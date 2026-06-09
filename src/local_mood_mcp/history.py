@@ -75,7 +75,9 @@ def _get_or_add(into: dict[str, Track], track: Track) -> Track:
     return existing
 
 
-async def build_library(client: SpotifyClient, *, saved_cap: int = 2000) -> Library:
+async def build_library(
+    client: SpotifyClient, *, saved_cap: int = 2000, recent: list[dict] | None = None
+) -> Library:
     merged: dict[str, Track] = {}
     summary: Counter[str] = Counter()
 
@@ -95,7 +97,8 @@ async def build_library(client: SpotifyClient, *, saved_cap: int = 2000) -> Libr
                 rec.sources.append("top_" + time_range)
         summary[time_range] = len(items)
 
-    recent = await client.recently_played()
+    if recent is None:
+        recent = await client.recently_played()
     for item in recent:
         t = _track_from_api(item.get("track", {}))
         if not t:
@@ -256,6 +259,16 @@ async def merge_extended_history(
                 library.tracks.append(beh)  # keep behavior even without metadata
             added += 1
 
+    export_max_ts = max((t.last_played_ms or 0 for t in parsed.values()), default=0)
+    if export_max_ts:
+        library.lifetime_through_ms = max(library.lifetime_through_ms or 0, export_max_ts)
+        # Journal plays at or before the export snapshot are already inside the
+        # export's aggregates (or were just overwritten by them) — never re-fold
+        # them. Advancing this marker keeps folding exactly-once.
+        library.journal_through_ms = max(
+            library.journal_through_ms or 0, library.lifetime_through_ms
+        )
+
     library.sources_summary["extended_history_unique_tracks"] = len(parsed)
     library.sources_summary["extended_history_matched"] = matched
     library.sources_summary["extended_history_added"] = added
@@ -324,6 +337,8 @@ def carry_over_lifetime(previous: Library | None, fresh: Library) -> int:
     """
     if previous is None:
         return 0
+    fresh.lifetime_through_ms = previous.lifetime_through_ms
+    fresh.journal_through_ms = previous.journal_through_ms
     by_id = fresh.by_id()
     preserved = 0
     for old in previous.tracks:
@@ -356,6 +371,76 @@ def _copy_behavior(src: Track, dst: Track) -> None:
         dst.name = src.name
     if not dst.artist_names or dst.artist_names == [""]:
         dst.artist_names = src.artist_names
+
+
+# --- play journal: memory that accrues between exports ----------------------
+def observations_from_recent(recent_items: list[dict]) -> list[dict]:
+    """Turn the API's recently-played items into journal observations."""
+    out: list[dict] = []
+    for item in recent_items:
+        track = item.get("track") or {}
+        tid = track.get("id")
+        ts = _iso_to_ms(item.get("played_at"))
+        if not tid or ts is None:
+            continue
+        out.append({
+            "ts_ms": ts,
+            "track_id": tid,
+            "name": track.get("name", ""),
+            "artists": [a.get("name", "") for a in track.get("artists", [])],
+        })
+    return out
+
+
+def fold_journal(library: Library, entries: list[dict]) -> int:
+    """Fold journaled plays into lifetime aggregates, exactly once.
+
+    Only entries newer than both memory markers apply: anything at or before
+    lifetime_through_ms is already inside the export's aggregates, and anything
+    at or before journal_through_ms was folded by a previous sync. Journal
+    plays carry when/what but not completion/skip (the API window doesn't
+    expose those), so they strengthen play-count and time-of-day signals only.
+    Returns the number of plays folded.
+    """
+    floor = max(library.journal_through_ms or 0, library.lifetime_through_ms or 0)
+    by_id = library.by_id()
+    folded = 0
+    high = library.journal_through_ms or 0
+    for entry in sorted(entries, key=lambda e: (e["ts_ms"], e["track_id"])):
+        ts = int(entry["ts_ms"])
+        if ts <= floor:
+            continue
+        t = by_id.get(entry["track_id"])
+        if t is None:
+            t = Track(
+                id=entry["track_id"],
+                name=entry.get("name", ""),
+                artist_names=list(entry.get("artists") or [""]),
+                sources=["journal"],
+            )
+            library.tracks.append(t)
+            by_id[t.id] = t
+        elif "journal" not in t.sources:
+            t.sources.append("journal")
+        t.lifetime_plays += 1
+        try:
+            local = datetime.fromtimestamp(ts / 1000)  # local tz, like the export
+            t.hour_hist[local.hour] += 1
+            if local.weekday() >= 5:
+                t.weekend_plays += 1
+            else:
+                t.weekday_plays += 1
+        except (OverflowError, OSError, ValueError):
+            pass
+        if t.first_play_ms is None or ts < t.first_play_ms:
+            t.first_play_ms = ts
+        if (t.last_played_ms or 0) < ts:
+            t.last_played_ms = ts
+        folded += 1
+        high = max(high, ts)
+    if folded:
+        library.journal_through_ms = high
+    return folded
 
 
 async def _fetch_track_metas(client: SpotifyClient, track_ids: list[str]) -> dict[str, Track]:

@@ -4,11 +4,13 @@ import json
 
 from local_mood_mcp.history import (
     carry_over_lifetime,
+    fold_journal,
     memory_impact,
+    observations_from_recent,
     parse_extended_history,
 )
 from local_mood_mcp.models import TIER_SHORT, Track
-from local_mood_mcp.store import Library
+from local_mood_mcp.store import Library, append_play_journal, read_play_journal
 
 _DAY_MS = 86_400_000
 
@@ -75,6 +77,66 @@ def test_memory_impact_without_memory():
     assert impact["long_term_memory"]["streams_remembered"] == 0
     assert impact["memory_multiplier"] is None
     assert impact["moods_unlocked"] == 9  # instant moods only
+
+
+# --- play journal: memory that accrues --------------------------------------
+def test_journal_append_dedupes(tmp_path):
+    path = tmp_path / "play_journal.jsonl"
+    plays = [
+        {"ts_ms": 1_000, "track_id": "a" * 22, "name": "s", "artists": ["A"]},
+        {"ts_ms": 2_000, "track_id": "a" * 22, "name": "s", "artists": ["A"]},
+    ]
+    assert append_play_journal(path, plays) == 2
+    assert append_play_journal(path, plays) == 0  # next sync: same window, nothing new
+    newer = plays + [{"ts_ms": 3_000, "track_id": "b" * 22, "name": "t", "artists": ["B"]}]
+    assert append_play_journal(path, newer) == 1
+    assert len(read_play_journal(path)) == 3
+
+
+def test_fold_journal_exactly_once_and_respects_export_floor():
+    lib = Library(tracks=[_t("a" * 22)], lifetime_through_ms=1_000_000)
+    entries = [
+        {"ts_ms": 999_999, "track_id": "a" * 22},  # already inside the export
+        {"ts_ms": 2_000_000, "track_id": "a" * 22},
+        {"ts_ms": 3_000_000, "track_id": "z" * 22, "name": "new", "artists": ["Z"]},
+    ]
+    assert fold_journal(lib, entries) == 2
+    by_id = lib.by_id()
+    assert by_id["a" * 22].lifetime_plays == 1  # the pre-export play didn't double
+    assert ("z" * 22) in by_id  # the journal can introduce tracks
+    assert by_id["z" * 22].sources == ["journal"]
+    assert lib.journal_through_ms == 3_000_000
+    assert fold_journal(lib, entries) == 0  # second sync folds nothing again
+
+
+def test_journal_alone_accrues_lifetime_memory():
+    lib = Library(tracks=[_t("a" * 22)])  # no export ever imported
+    entries = [{"ts_ms": ts, "track_id": "a" * 22} for ts in (1_000, 2_000, 3_000)]
+    assert fold_journal(lib, entries) == 3
+    track = lib.by_id()["a" * 22]
+    assert track.lifetime_plays == 3
+    assert track.has_lifetime  # memory built purely from journaled API windows
+
+
+def test_carry_over_preserves_memory_markers():
+    previous = Library(tracks=[], lifetime_through_ms=5, journal_through_ms=9)
+    fresh = Library(tracks=[])
+    carry_over_lifetime(previous, fresh)
+    assert fresh.lifetime_through_ms == 5
+    assert fresh.journal_through_ms == 9
+
+
+def test_observations_from_recent_extracts_plays():
+    items = [
+        {"track": {"id": "a" * 22, "name": "s", "artists": [{"name": "A"}]},
+         "played_at": "2026-01-01T10:00:00Z"},
+        {"track": {}, "played_at": "2026-01-01T11:00:00Z"},  # no id -> skipped
+    ]
+    obs = observations_from_recent(items)
+    assert len(obs) == 1
+    assert obs[0]["track_id"] == "a" * 22
+    assert isinstance(obs[0]["ts_ms"], int)
+    assert obs[0]["artists"] == ["A"]
 
 
 def test_parse_aggregates_and_reports_skipped_files(tmp_path):

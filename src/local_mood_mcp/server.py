@@ -23,7 +23,13 @@ from . import playback as playback_mod
 from . import playlists as playlists_mod
 from .config import Settings, load_settings
 from .spotify_client import SpotifyClient
-from .store import Library, load_library, save_library
+from .store import (
+    Library,
+    append_play_journal,
+    load_library,
+    read_play_journal,
+    save_library,
+)
 from .tokenstore import TokenStore
 
 mcp = FastMCP("local-mood")
@@ -85,15 +91,24 @@ async def sync_listening_history(saved_cap: int = 2000, auto_import_history: boo
     """Fetch and analyze the user's listening history from all available Spotify
     sources (top tracks across short/medium/long term, recently played, and the
     saved library), capture era/explicit/duration, dedupe, and cache it locally.
-    Lifetime behavior from a previously imported Extended Streaming History
-    export is PRESERVED across re-syncs. If an export has been dropped into the
-    drop folder, it is auto-merged (unless auto_import_history is false),
-    unlocking the lifetime moods. `saved_cap` bounds saved-track pulls."""
+    Memory is durable and accruing: lifetime behavior from a previously imported
+    Extended Streaming History export is PRESERVED across re-syncs, and every
+    sync journals the API's ~50-play window into a local play log so lifetime
+    signals keep deepening between (or without) exports. If an export has been
+    dropped into the drop folder, it is auto-merged (unless auto_import_history
+    is false), unlocking the lifetime moods. `saved_cap` bounds saved-track
+    pulls."""
     try:
         async with _client() as (settings, client):
             previous = load_library(settings.library_path)
-            library = await history_mod.build_library(client, saved_cap=saved_cap)
+            recent = await client.recently_played()
+            library = await history_mod.build_library(
+                client, saved_cap=saved_cap, recent=recent
+            )
             preserved = history_mod.carry_over_lifetime(previous, library)
+            new_plays = append_play_journal(
+                settings.journal_path, history_mod.observations_from_recent(recent)
+            )
             result = {
                 "tracks_analyzed": len(library.tracks),
                 "sources": dict(library.sources_summary),
@@ -107,17 +122,22 @@ async def sync_listening_history(saved_cap: int = 2000, auto_import_history: boo
                     client, library, settings.history_dir
                 )
                 result["extended_history_auto_imported"] = report
-                result["lifetime_moods_unlocked"] = True
-            else:
-                unlocked = any(t.has_lifetime for t in library.tracks)
-                result["lifetime_moods_unlocked"] = unlocked
-                if not unlocked:
-                    result["drop_folder"] = settings.history_dir.as_posix()
-                    result["hint"] = (
-                        "Drop your Extended Streaming History JSON files into the folder "
-                        "above (then re-run sync) to unlock lifetime moods like morning, "
-                        "on_repeat, comfort."
-                    )
+            journal_entries = read_play_journal(settings.journal_path)
+            folded = history_mod.fold_journal(library, journal_entries)
+            result["memory_journal"] = {
+                "new_plays_recorded": new_plays,
+                "plays_folded_into_library": folded,
+                "total_plays_journaled": len(journal_entries),
+            }
+            unlocked = any(t.has_lifetime for t in library.tracks)
+            result["lifetime_moods_unlocked"] = unlocked
+            if not unlocked:
+                result["drop_folder"] = settings.history_dir.as_posix()
+                result["hint"] = (
+                    "Drop your Extended Streaming History JSON files into the folder "
+                    "above (then re-run sync) to unlock lifetime moods like morning, "
+                    "on_repeat, comfort."
+                )
             save_library(settings.library_path, library)
             return result
     except Exception as e:
@@ -216,7 +236,14 @@ def library_stats() -> dict:
             "lifetime_loaded": with_lifetime > 0,
             "tracks_with_lifetime_data": with_lifetime,
             "total_lifetime_plays": sum(t.lifetime_plays for t in lib.tracks),
-            "memory_impact": history_mod.memory_impact(lib),
+            "memory_impact": {
+                **history_mod.memory_impact(lib),
+                "journal": {
+                    "plays_journaled": len(read_play_journal(settings.journal_path)),
+                    "note": "Every sync journals the API's ~50-play window, so "
+                            "memory accrues even without a new export.",
+                },
+            },
         }
     except Exception as e:
         return _err(e)

@@ -4,6 +4,7 @@
 fkey
 library.json
 tokens.enc
+play_journal.jsonl
 
 # Extended Streaming History export — PERSONAL DATA (IPs, timestamps). Never commit.
 # Everything in the drop folder is ignored except the README and .gitkeep.

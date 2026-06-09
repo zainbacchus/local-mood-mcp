@@ -116,6 +116,12 @@ class Settings:
     def library_path(self) -> Path:
         return self.state_dir / "library.json"
 
+    @property
+    def journal_path(self) -> Path:
+        """Append-only log of observed plays — how memory accrues between
+        (or without) Extended Streaming History exports."""
+        return self.state_dir / "play_journal.jsonl"
+
     def has_dropped_history(self) -> bool:
         """True if any JSON files are present in the drop folder (recursively)."""
         return any(self.history_dir.rglob("*.json"))
