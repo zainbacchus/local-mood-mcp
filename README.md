@@ -22,8 +22,10 @@ that are impossible without it.
 I wanted my team to feel, not just hear, why memory matters in our AI
 workflows. Every signal here has an analogue in the systems we build: the
 API's 50-play window is a context window; the export is long-term memory; the
-lifetime moods are the capabilities that only exist once a system can
-remember. Better context leads to better outcomes.
+emotional labels are semantic memory — the model's knowledge, written down
+once instead of guessed at every time; the lifetime moods are the
+capabilities that only exist once a system can remember. Better context leads
+to better outcomes.
 
 ## The experiment
 
@@ -110,7 +112,7 @@ Then register the server with your MCP client (e.g. Claude Desktop
 
 ## How "mood" is defined
 
-Two tiers of moods, matching the two tiers of memory — all deterministic:
+Three tiers of moods, matching three tiers of memory — all deterministic:
 
 **Instant moods** (working memory — work the moment you `sync_listening_history`,
 from API affinity): `current_rotation`, `steady_favorites`,
@@ -121,10 +123,21 @@ from API affinity): `current_rotation`, `steady_favorites`,
 export, see below): `morning`, `late_night`, `weekend`, `on_repeat`, `comfort`,
 `focus_flow`, `deep_cuts`.
 
-Each mood is a pure scoring function in [`moods.py`](src/local_mood_mcp/moods.py)
-over signals like affinity tier, release year, duration, recency, play count,
-completion/skip ratio, deliberate starts, and an hour-of-day histogram. Every
-selection comes with a per-component `why` breakdown.
+**Emotional moods** (semantic memory — need labels written via
+`annotate_tracks`): `happy`, `energetic`, `motivated`, `sad`, `melancholy`,
+`calm`. Spotify exposes no emotional signal, so these can't be measured — but
+the model driving the MCP client *knows* these songs. Ask it to read your
+library (`list_library_tracks`), judge the tracks it knows, and write the
+labels back once. That's the model's world knowledge persisted as data:
+subjective judgments, honestly marked as such — and once stored, selection
+over them is exactly as deterministic and reproducible as everything else.
+An emotional playlist is never padded with unlabeled tracks.
+
+Each behavioral mood is a pure scoring function in
+[`moods.py`](src/local_mood_mcp/moods.py) over signals like affinity tier,
+release year, duration, recency, play count, completion/skip ratio, deliberate
+starts, and an hour-of-day histogram. Every selection comes with a
+per-component `why` breakdown.
 
 > **On determinism:** selection is exactly reproducible for a fixed point in
 > time. Moods that weight *recency* (`current_rotation`, `on_repeat`) naturally
@@ -174,7 +187,9 @@ committed. Until the export arrives, instant moods work fully.
 | `import_extended_history` | Fold in lifetime behavior from the official export (defaults to the drop folder) |
 | `extended_history_status` | Show the drop folder, detected files, and whether lifetime data is loaded |
 | `library_stats` | Track count, tiers, eras — plus `memory_impact` metrics (memory vs. the API window) |
-| `list_moods` | The moods, each marked instant vs. needs-export |
+| `list_moods` | All moods across the three memory tiers, each marked with what it needs |
+| `list_library_tracks` | Page through the library (most-listened first) — how the model reads it for labeling |
+| `annotate_tracks` | Write emotional labels (semantic memory): happy, energetic, motivated, sad, melancholy, calm |
 | `generate_playlist` | **Deterministic** selection → preview of exact track IDs + rationale |
 | `compare_memory` | **The experiment**: same mood with vs. without memory, plus the diff |
 | `explain_track` | Why a track scores as it does for a mood |
@@ -235,8 +250,10 @@ defined by **how you actually listen** — affinity, recency, era, length, and
 
 - **No discovery** — this re-curates what you've already played; it cannot
   suggest unheard music (the recommendations endpoint is dead for new apps).
-- **No genre or acoustic mood** — Spotify exposes neither to new apps. Mood is
-  behavioral/temporal/era-based, deliberately transparent rather than a black box.
+- **No genre or acoustic mood from Spotify** — the API exposes neither to new
+  apps. Behavioral moods are temporal/era-based and deliberately transparent;
+  emotional moods come from **model-written labels**, which are subjective
+  judgments (re-runnable, versioned via `annotate_tracks`), not measurements.
 - **No "entire" history via the API** — recently-played caps at ~50 and there's
   no full-stream endpoint. `import_extended_history` is the only lifetime path.
 - **Hour-of-day buckets use your machine's current timezone** — plays made in

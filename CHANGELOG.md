@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Semantic memory tier: `annotate_tracks` persists emotional labels written
+  by the MCP client (`happy`, `energetic`, `motivated`, `sad`, `melancholy`,
+  `calm`), `list_library_tracks` pages the library for labeling, and six
+  emotional moods select deterministically over the stored labels — never
+  padded with unlabeled tracks. Labels survive re-syncs and are reported in
+  `memory_impact` as their own tier (moods: 16 → 22).
 - `compare_memory` tool: the README's experiment as one command — the same
   mood selected with long-term memory and as if only the API window existed,
   plus the diff (overlap, picks only memory finds, one-line verdict).
