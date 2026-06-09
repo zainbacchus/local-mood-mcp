@@ -1,0 +1,378 @@
+"""MCP server exposing the Spotify mood toolkit.
+
+Design principles encoded in the tool surface:
+  * Mood -> tracks is DETERMINISTIC and returns EXACT Spotify track IDs.
+  * Playlist creation only ever consumes explicit track IDs (no NL track-picking).
+  * Only non-deprecated Spotify endpoints are touched.
+  * Auth/token handling is delegated to the secure PKCE + keyring layer.
+
+Run with: `spotify-mood-mcp` (stdio transport, for Claude Desktop / clients).
+"""
+
+from __future__ import annotations
+
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
+
+from . import history as history_mod
+from . import moods as moods_mod
+from . import playback as playback_mod
+from . import playlists as playlists_mod
+from .auth import AuthError
+from .config import Settings, load_settings
+from .spotify_client import SpotifyClient
+from .store import Library, load_library, save_library
+from .tokenstore import TokenStore
+
+mcp = FastMCP("spotify-mood")
+
+
+def _settings() -> Settings:
+    return load_settings()
+
+
+@asynccontextmanager
+async def _client():
+    settings = _settings()
+    client = SpotifyClient(settings)
+    try:
+        yield settings, client
+    finally:
+        await client.aclose()
+
+
+def _require_library(settings: Settings) -> Library:
+    lib = load_library(settings.library_path)
+    if lib is None or not lib.tracks:
+        raise RuntimeError(
+            "No analyzed library yet. Run the `sync_listening_history` tool first."
+        )
+    return lib
+
+
+def _err(e: Exception) -> dict:
+    return {"error": type(e).__name__, "message": str(e)}
+
+
+# --- auth / status ----------------------------------------------------------
+@mcp.tool()
+def spotify_auth_status() -> dict:
+    """Report whether the user is authenticated and how long the access token lasts.
+    Does NOT trigger a login (login is a one-time terminal step: `spotify-mood-auth login`)."""
+    try:
+        settings = _settings()
+    except Exception as e:
+        return _err(e)
+    bundle = TokenStore(settings.state_dir).load()
+    if not bundle:
+        return {
+            "authenticated": False,
+            "how_to_fix": "Run `spotify-mood-auth login` once in a terminal to grant access.",
+        }
+    return {
+        "authenticated": True,
+        "scopes": bundle.scope.split(),
+        "access_token_expires_in_seconds": max(int(bundle.expires_at - time.time()), 0),
+        "confidential_client": settings.is_confidential,
+    }
+
+
+# --- history ----------------------------------------------------------------
+@mcp.tool()
+async def sync_listening_history(saved_cap: int = 2000) -> dict:
+    """Fetch and analyze the user's listening history from all available Spotify
+    sources (top tracks across short/medium/long term, recently played, and the
+    saved library), enrich every track with artist genres, dedupe, and cache it
+    locally. `saved_cap` bounds how many saved tracks to pull. Returns a summary."""
+    try:
+        async with _client() as (settings, client):
+            library = await history_mod.build_library(client, saved_cap=saved_cap)
+            save_library(settings.library_path, library)
+            return {
+                "tracks_analyzed": len(library.tracks),
+                "sources": library.sources_summary,
+                "with_genres": sum(1 for t in library.tracks if t.genres),
+                "cached_at": settings.library_path.as_posix(),
+                "note": (
+                    "Spotify's API does not expose full lifetime history. For that, "
+                    "use import_extended_history with your downloaded Extended "
+                    "Streaming History export."
+                ),
+            }
+    except (AuthError, Exception) as e:
+        return _err(e)
+
+
+@mcp.tool()
+async def import_extended_history(export_path: str, top_n_unknown: int = 200) -> dict:
+    """Fold true lifetime play counts from a Spotify 'Extended Streaming History'
+    export into the cached library. `export_path` may be a single JSON file or the
+    folder of Streaming_History_Audio_*.json files. `top_n_unknown` controls how
+    many never-before-seen lifetime favourites to fetch and add. Run
+    sync_listening_history first."""
+    try:
+        settings = _settings()
+        library = _require_library(settings)
+        path = Path(export_path).expanduser()
+        if not path.exists():
+            return {"error": "FileNotFound", "message": f"No such path: {path}"}
+        async with _client() as (_s, client):
+            library, report = await history_mod.merge_extended_history(
+                client, library, path, top_n_unknown=top_n_unknown
+            )
+            save_library(settings.library_path, library)
+            return {"tracks_in_library": len(library.tracks), **report}
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def library_stats() -> dict:
+    """Summarize the locally cached, analyzed library: track count, source
+    breakdown, genre coverage, and when it was built."""
+    try:
+        settings = _settings()
+        lib = load_library(settings.library_path)
+        if lib is None:
+            return {"exists": False, "how_to_fix": "Run sync_listening_history."}
+        top_genres: dict[str, int] = {}
+        for t in lib.tracks:
+            for g in t.genres:
+                top_genres[g] = top_genres.get(g, 0) + 1
+        ranked = sorted(top_genres.items(), key=lambda kv: (-kv[1], kv[0]))[:20]
+        return {
+            "exists": True,
+            "tracks": len(lib.tracks),
+            "built_at_epoch": lib.built_at,
+            "sources": lib.sources_summary,
+            "with_genres": sum(1 for t in lib.tracks if t.genres),
+            "top_genres": [{"genre": g, "tracks": n} for g, n in ranked],
+        }
+    except Exception as e:
+        return _err(e)
+
+
+# --- moods / generation -----------------------------------------------------
+@mcp.tool()
+def list_moods() -> list[dict]:
+    """List the available moods and the deterministic rules (genre keywords,
+    popularity/era/explicit preferences) that define each one."""
+    return moods_mod.list_moods()
+
+
+def _build_filters(
+    min_popularity: int,
+    max_popularity: int,
+    min_year: int | None,
+    max_year: int | None,
+    exclude_explicit: bool,
+    require_genre_match: bool,
+    familiarity_weight: float,
+) -> "playlists_mod.Filters":
+    return playlists_mod.Filters(
+        min_popularity=min_popularity,
+        max_popularity=max_popularity,
+        min_year=min_year,
+        max_year=max_year,
+        exclude_explicit=exclude_explicit,
+        require_genre_match=require_genre_match,
+        familiarity_weight=familiarity_weight,
+    )
+
+
+@mcp.tool()
+def generate_playlist(
+    mood: str,
+    count: int = 25,
+    min_popularity: int = 0,
+    max_popularity: int = 100,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    exclude_explicit: bool = False,
+    require_genre_match: bool = False,
+    familiarity_weight: float = 0.25,
+) -> dict:
+    """Deterministically select tracks from the cached library for a mood and
+    return a PREVIEW of the exact track IDs (with per-track scoring rationale).
+    This does NOT create anything on Spotify — pass the returned `track_ids` to
+    create_playlist (or play) when you're happy. Re-running with identical
+    parameters returns the identical ordered list."""
+    try:
+        settings = _settings()
+        library = _require_library(settings)
+        filters = _build_filters(
+            min_popularity, max_popularity, min_year, max_year,
+            exclude_explicit, require_genre_match, familiarity_weight,
+        )
+        sels = playlists_mod.select_for_mood(library, mood, count=count, filters=filters)
+        preview = playlists_mod.selection_to_preview(sels)
+        return {
+            "mood": mood,
+            "count": len(preview),
+            "track_ids": [p["id"] for p in preview],
+            "tracks": preview,
+            "deterministic": True,
+        }
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def explain_track(track_id: str, mood: str) -> dict:
+    """Explain why a specific track (must be in the cached library) scores the way
+    it does for a given mood — the full component breakdown."""
+    try:
+        settings = _settings()
+        library = _require_library(settings)
+        track = library.by_id().get(track_id.strip())
+        if not track:
+            return {"error": "NotInLibrary", "message": f"{track_id} not in cached library."}
+        spec = moods_mod.get_mood(mood)
+        score, comps = moods_mod.score_track(track, spec)
+        return {
+            "track": track.name,
+            "artists": track.artist_names,
+            "genres": track.genres,
+            "popularity": track.popularity,
+            "release_year": track.release_year,
+            "explicit": track.explicit,
+            "play_count": track.play_count,
+            "mood": spec.key,
+            "score": round(score, 4),
+            "components": {k: round(v, 4) for k, v in comps.items()},
+        }
+    except Exception as e:
+        return _err(e)
+
+
+# --- playlist creation (exact IDs only) ------------------------------------
+@mcp.tool()
+async def create_playlist(
+    name: str,
+    track_ids: list[str],
+    public: bool = False,
+    description: str = "",
+) -> dict:
+    """Create a new Spotify playlist from the EXACT given track IDs (or URIs/URLs),
+    in order. This is the only creation path — it never interprets natural
+    language. Typically you pass the `track_ids` from generate_playlist."""
+    try:
+        async with _client() as (_s, client):
+            return await playlists_mod.create_playlist_from_ids(
+                client, name=name, track_ids=track_ids, public=public, description=description
+            )
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+async def create_mood_playlist(
+    name: str,
+    mood: str,
+    count: int = 25,
+    public: bool = False,
+    description: str = "",
+    min_popularity: int = 0,
+    max_popularity: int = 100,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    exclude_explicit: bool = False,
+    require_genre_match: bool = False,
+    familiarity_weight: float = 0.25,
+) -> dict:
+    """Convenience: deterministically select for `mood`, then create the playlist
+    from those exact IDs in one step. Equivalent to generate_playlist followed by
+    create_playlist with the returned IDs."""
+    try:
+        settings = _settings()
+        library = _require_library(settings)
+        filters = _build_filters(
+            min_popularity, max_popularity, min_year, max_year,
+            exclude_explicit, require_genre_match, familiarity_weight,
+        )
+        sels = playlists_mod.select_for_mood(library, mood, count=count, filters=filters)
+        ids = [s.track.id for s in sels]
+        if not ids:
+            return {"error": "NoMatches", "message": f"No tracks matched mood {mood!r} with those filters."}
+        desc = description or f"Deterministic {mood} mix from your listening history (spotify-mood-mcp)."
+        async with _client() as (_s, client):
+            result = await playlists_mod.create_playlist_from_ids(
+                client, name=name, track_ids=ids, public=public, description=desc
+            )
+        result["mood"] = mood
+        result["selected_tracks"] = playlists_mod.selection_to_preview(sels)
+        return result
+    except Exception as e:
+        return _err(e)
+
+
+# --- playback ---------------------------------------------------------------
+@mcp.tool()
+async def list_devices() -> list[dict] | dict:
+    """List the user's available Spotify Connect devices (id, name, type, active)."""
+    try:
+        async with _client() as (_s, client):
+            return await playback_mod.list_devices(client)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+async def play(
+    track_ids: list[str] | None = None,
+    playlist_id: str | None = None,
+    device_id: str | None = None,
+) -> dict:
+    """Start playback (Spotify Premium + an active device required). Provide either
+    `track_ids` (exact IDs/URIs to play in order) or `playlist_id` (plays that
+    playlist's context). If no device_id is given, the active or first device is used."""
+    try:
+        context_uri = f"spotify:playlist:{playlist_id}" if playlist_id else None
+        async with _client() as (_s, client):
+            return await playback_mod.play(
+                client, track_ids=track_ids, context_uri=context_uri, device_id=device_id
+            )
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+async def pause(device_id: str | None = None) -> dict:
+    """Pause playback on the active (or specified) device."""
+    try:
+        async with _client() as (_s, client):
+            return await playback_mod.pause(client, device_id=device_id)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+async def skip_next(device_id: str | None = None) -> dict:
+    """Skip to the next track on the active (or specified) device."""
+    try:
+        async with _client() as (_s, client):
+            return await playback_mod.skip_next(client, device_id=device_id)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+async def now_playing() -> dict:
+    """Show what is currently playing (track, artists, device, progress)."""
+    try:
+        async with _client() as (_s, client):
+            return await playback_mod.now_playing(client)
+    except Exception as e:
+        return _err(e)
+
+
+def main() -> None:
+    mcp.run()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
