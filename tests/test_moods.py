@@ -5,15 +5,15 @@ Synthetic tracks only — no network, no auth.
 
 import pytest
 
-from spotify_mood_mcp.models import TIER_LONG, TIER_SHORT, TIER_MEDIUM, Track
-from spotify_mood_mcp.moods import build_context, get_mood, list_moods, score_track
-from spotify_mood_mcp.playlists import (
+from local_mood_mcp.models import TIER_LONG, TIER_SHORT, TIER_MEDIUM, Track
+from local_mood_mcp.moods import build_context, get_mood, list_moods, score_track
+from local_mood_mcp.playlists import (
     Filters,
     LifetimeRequiredError,
     select_for_mood,
     validate_track_ids,
 )
-from spotify_mood_mcp.store import Library
+from local_mood_mcp.store import Library
 
 
 def _t(id_, **kw):

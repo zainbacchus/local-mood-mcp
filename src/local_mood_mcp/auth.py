@@ -132,8 +132,8 @@ def ensure_access_token(settings: Settings, store: TokenStore) -> TokenBundle:
     bundle = store.load()
     if bundle is None:
         raise AuthError(
-            "Not authenticated. Run `spotify-mood-auth login` "
-            "(or `python -m spotify_mood_mcp.auth login`) once to grant access."
+            "Not authenticated. Run `local-mood-auth login` "
+            "(or `python -m local_mood_mcp.auth login`) once to grant access."
         )
     if time.time() >= bundle.expires_at - _EXPIRY_SKEW_SECONDS:
         if not bundle.refresh_token:
@@ -236,7 +236,7 @@ def cli_main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
     cmd = args[0] if args else "login"
     if cmd in ("-h", "--help", "help"):
-        print("Usage: spotify-mood-auth [login|logout|status]")
+        print("Usage: local-mood-auth [login|logout|status]")
         return 0
     try:
         settings = load_settings()

@@ -24,7 +24,7 @@ import keyring
 from keyring.errors import KeyringError
 from cryptography.fernet import Fernet, InvalidToken
 
-_SERVICE = "spotify-mood-mcp"
+_SERVICE = "local-mood-mcp"
 _ACCOUNT = "token-bundle"
 _KEY_ACCOUNT = "file-encryption-key"
 
@@ -127,7 +127,7 @@ class TokenStore:
         if self._keyfile_path.exists():
             return self._keyfile_path.read_bytes()
         print(
-            "[spotify-mood-mcp] WARNING: OS keyring unavailable; storing the "
+            "[local-mood-mcp] WARNING: OS keyring unavailable; storing the "
             "token-encryption key in a 0600 file. This is less secure than a "
             "system keyring.",
             file=sys.stderr,

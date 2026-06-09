@@ -1,4 +1,4 @@
-# spotify-mood-mcp
+# local-mood-mcp
 
 A **deterministic, behavior-based Spotify playlist generator** and playback
 controller, exposed as an [MCP](https://modelcontextprotocol.io) server so you
@@ -37,7 +37,7 @@ Two tiers of moods, all deterministic:
 `morning`, `late_night`, `weekend`, `on_repeat`, `comfort`, `focus_flow`,
 `deep_cuts`.
 
-Each mood is a pure scoring function in [`moods.py`](src/spotify_mood_mcp/moods.py)
+Each mood is a pure scoring function in [`moods.py`](src/local_mood_mcp/moods.py)
 over signals like affinity tier, release year, duration, recency, play count,
 completion/skip ratio, deliberate starts, and an hour-of-day histogram. Every
 selection comes with a per-component `why` breakdown.
@@ -50,12 +50,12 @@ selection comes with a per-component `why` breakdown.
   at config load (Spotify no longer accepts it); the callback server binds to
   `127.0.0.1` only and handles exactly one request.
 - **Least-privilege scopes**, each requested explicitly and justified in
-  [`config.py`](src/spotify_mood_mcp/config.py).
+  [`config.py`](src/local_mood_mcp/config.py).
 - **Tokens stored securely:** OS keyring (macOS Keychain / libsecret / Windows
   Credential Locker) by default; encrypted-file fallback (Fernet, key in keyring,
   `0600`) only if no keyring exists — with a loud warning. Tokens are never logged.
 - Client secret is **optional** (PKCE needs only the client id). Secrets and local
-  state (`~/.spotify-mood-mcp`) are kept out of the repo.
+  state (`~/.local-mood-mcp`) are kept out of the repo.
 
 ## Setup
 
@@ -73,7 +73,7 @@ selection comes with a per-component `why` breakdown.
 
 4. **Authorize once** (opens your browser):
    ```bash
-   spotify-mood-auth login      # also: status | logout
+   local-mood-auth login      # also: status | logout
    ```
 
 5. **Register the MCP server** with your client (e.g. Claude Desktop
@@ -81,8 +81,8 @@ selection comes with a per-component `why` breakdown.
    ```json
    {
      "mcpServers": {
-       "spotify-mood": {
-         "command": "/absolute/path/to/.venv/bin/spotify-mood-mcp",
+       "local-mood": {
+         "command": "/absolute/path/to/.venv/bin/local-mood-mcp",
          "env": { "SPOTIFY_CLIENT_ID": "your_client_id" }
        }
      }

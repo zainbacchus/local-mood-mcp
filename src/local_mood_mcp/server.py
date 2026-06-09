@@ -6,7 +6,7 @@ Design principles encoded in the tool surface:
   * Only non-deprecated Spotify endpoints are touched.
   * Auth/token handling is delegated to the secure PKCE + keyring layer.
 
-Run with: `spotify-mood-mcp` (stdio transport, for Claude Desktop / clients).
+Run with: `local-mood-mcp` (stdio transport, for Claude Desktop / clients).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from .spotify_client import SpotifyClient
 from .store import Library, load_library, save_library
 from .tokenstore import TokenStore
 
-mcp = FastMCP("spotify-mood")
+mcp = FastMCP("local-mood")
 
 
 def _settings() -> Settings:
@@ -62,7 +62,7 @@ def _err(e: Exception) -> dict:
 @mcp.tool()
 def spotify_auth_status() -> dict:
     """Report whether the user is authenticated and how long the access token lasts.
-    Does NOT trigger a login (login is a one-time terminal step: `spotify-mood-auth login`)."""
+    Does NOT trigger a login (login is a one-time terminal step: `local-mood-auth login`)."""
     try:
         settings = _settings()
     except Exception as e:
@@ -71,7 +71,7 @@ def spotify_auth_status() -> dict:
     if not bundle:
         return {
             "authenticated": False,
-            "how_to_fix": "Run `spotify-mood-auth login` once in a terminal to grant access.",
+            "how_to_fix": "Run `local-mood-auth login` once in a terminal to grant access.",
         }
     return {
         "authenticated": True,
@@ -367,7 +367,7 @@ async def create_mood_playlist(
         ids = [s.track.id for s in sels]
         if not ids:
             return {"error": "NoMatches", "message": f"No tracks matched mood {mood!r} with those filters."}
-        desc = description or f"Deterministic {mood} mix from your listening history (spotify-mood-mcp)."
+        desc = description or f"Deterministic {mood} mix from your listening history (local-mood-mcp)."
         async with _client() as (_s, client):
             result = await playlists_mod.create_playlist_from_ids(
                 client, name=name, track_ids=ids, public=public, description=desc
