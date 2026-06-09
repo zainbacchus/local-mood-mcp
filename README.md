@@ -2,19 +2,58 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-%E2%89%A53.11-blue.svg)
-![Tests](https://img.shields.io/badge/tests-16%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)
 
-Build **deterministic, behavior-based Spotify playlists** from how you actually
-listen — and drive playback — straight from Claude (or any
-[MCP](https://modelcontextprotocol.io) client). Spotify-only, no external
-services. Same library + same parameters → the **identical ordered list of exact
-track IDs**, every time.
+> Spotify's API will tell a new app the last **~50 songs** you played.
+> Your Spotify export remembers **every song you've ever played**.
+> This project exists to measure what that difference is worth.
 
-Because Spotify's 2026 Web API gives new apps no genres, no popularity, and no
-audio features, a "mood" here isn't `valence/energy/genre` — it's a transparent
-scoring function over your **affinity, recency, release era, track length**, and
-(with the official export) **time-of-day and completion behavior**.
-[Why?](#why-behavioral-moods)
+**local-mood-mcp** is an [MCP](https://modelcontextprotocol.io) server that
+builds deterministic, behavior-based Spotify playlists — and controls playback —
+from Claude or any MCP client. It was built to demonstrate one idea:
+**personalization quality is a function of memory.** The scoring code never
+changes; the only variable is how much of your listening history it can see.
+Given identical developer constraints, adding memory turns a 50-play window
+into years of behavioral signal — unlocking playlist types and explanations
+that are impossible without it.
+
+## The experiment
+
+| | Working memory (API only) | Long-term memory (your export) |
+|---|---|---|
+| History depth | Last ~50 plays + 3×50 "top tracks" summaries | Every stream since your account was created |
+| Signals | "You played this recently", coarse affinity | Play counts, completions, skips, deliberate starts, hour-of-day, weekday/weekend, first/last play |
+| Moods available | 9 instant moods | + 7 lifetime moods |
+| Best possible "why" | "It's in your top tracks" | "Completed 96% of 412 plays, deliberately started, mostly 6–9 am, loyal since 2019" |
+
+Both tiers run the exact same selection algorithm
+([`playlists.py`](src/local_mood_mcp/playlists.py)). The lifetime moods
+(`morning`, `late_night`, `weekend`, `on_repeat`, `comfort`, `focus_flow`,
+`deep_cuts`) aren't better-tuned versions of the instant ones — they are
+**informationally impossible** without the export. No amount of cleverness
+recovers a completion ratio or an hour-of-day histogram from a 50-play window.
+
+A real `why`, from `explain_track` (illustrative values — only possible with
+the export loaded):
+
+```json
+{
+  "mood": "comfort",
+  "score": 0.91,
+  "components": { "completion": 0.96, "non_skip": 0.97, "loyalty": 1.0, "plays": 0.74 },
+  "lifetime_plays": 412,
+  "part_of_day": { "morning": 0.62, "afternoon": 0.21, "evening": 0.12, "night": 0.05 }
+}
+```
+
+**What this does *not* claim:** Spotify's own features (Daylist, Discover
+Weekly) use your full history internally, plus collaborative data from hundreds
+of millions of users — and this tool can't recommend music you've never played
+(the recommendations endpoint is gone for new apps). What it demonstrates is
+what *you* can build when given the same memory Spotify keeps for itself: full
+control over the slice ("morning songs, nothing explicit, pre-2010"), a
+transparent per-component `why` for every pick, and reproducible results
+instead of a black box.
 
 ## Quickstart
 
@@ -53,15 +92,16 @@ Then register the server with your MCP client (e.g. Claude Desktop
 
 ## How "mood" is defined
 
-Two tiers of moods, all deterministic:
+Two tiers of moods, matching the two tiers of memory — all deterministic:
 
-**Instant moods** (work the moment you `sync_listening_history`, from API affinity):
-`current_rotation`, `steady_favorites`, `all_time_favorites`, `throwback`,
-`fresh`, `long_form`, `quick_hits`, `clean`, `explicit`.
+**Instant moods** (working memory — work the moment you `sync_listening_history`,
+from API affinity): `current_rotation`, `steady_favorites`,
+`all_time_favorites`, `throwback`, `fresh`, `long_form`, `quick_hits`, `clean`,
+`explicit`.
 
-**Lifetime moods** (need your *Extended Streaming History* export — see below):
-`morning`, `late_night`, `weekend`, `on_repeat`, `comfort`, `focus_flow`,
-`deep_cuts`.
+**Lifetime moods** (long-term memory — need your *Extended Streaming History*
+export, see below): `morning`, `late_night`, `weekend`, `on_repeat`, `comfort`,
+`focus_flow`, `deep_cuts`.
 
 Each mood is a pure scoring function in [`moods.py`](src/local_mood_mcp/moods.py)
 over signals like affinity tier, release year, duration, recency, play count,
@@ -74,22 +114,7 @@ selection comes with a per-component `why` breakdown.
 > input library. For pinned, fully reproducible runs, `build_context` accepts an
 > optional `now_ms`.
 
-## Security posture
-
-- **Authorization Code + PKCE** only (Spotify ended implicit grant 2025-11-27).
-  CSRF-protected with a random `state` verified on callback.
-- **Loopback redirect** `http://127.0.0.1:8888/callback`. `localhost` is rejected
-  at config load (Spotify no longer accepts it); the callback server binds to
-  `127.0.0.1` only and handles exactly one request.
-- **Least-privilege scopes** — every scope in [`config.py`](src/local_mood_mcp/config.py)
-  maps to an endpoint this server actually calls; nothing is requested "just in case".
-- **Tokens stored securely:** OS keyring (macOS Keychain / libsecret / Windows
-  Credential Locker) by default; encrypted-file fallback (Fernet, key in keyring,
-  `0600`) only if no keyring exists — with a loud warning. Tokens are never logged.
-- Client secret is **optional** (PKCE needs only the client id). Secrets and local
-  state (`~/.local-mood-mcp`) are kept out of the repo.
-
-## Getting your Extended Streaming History (unlocks lifetime moods)
+## Giving it long-term memory (the Extended Streaming History)
 
 The Web API can't give true lifetime data, so lifetime moods read Spotify's
 official export:
@@ -108,6 +133,10 @@ official export:
    and unlocks the lifetime moods. (`import_extended_history` with no argument
    does the same; `extended_history_status` shows what's detected.)
 
+Once imported, the memory is durable: **lifetime behavior survives re-syncs**,
+and the import report tells you if any files were skipped or tracks dropped, so
+truncated memory is visible rather than silent.
+
 The export's personal data (IPs, timestamps) is created `0700` and is never
 committed. Until the export arrives, instant moods work fully.
 
@@ -116,7 +145,7 @@ committed. Until the export arrives, instant moods work fully.
 | Tool | What it does |
 |------|--------------|
 | `spotify_auth_status` | Auth state + token expiry (no login side-effect) |
-| `sync_listening_history` | Pull + analyze + cache your history (instant signals) |
+| `sync_listening_history` | Pull + analyze + cache your history (instant signals; preserves lifetime data) |
 | `import_extended_history` | Fold in lifetime behavior from the official export (defaults to the drop folder) |
 | `extended_history_status` | Show the drop folder, detected files, and whether lifetime data is loaded |
 | `library_stats` | Track count, affinity tiers, era distribution, lifetime status |
@@ -136,6 +165,21 @@ committed. Until the export arrives, instant moods work fully.
 listen-frequency). Ordering is fully specified: final score, then affinity
 plays, lifetime plays, and finally track id as a stable tiebreak.
 
+## Security posture
+
+- **Authorization Code + PKCE** only (Spotify ended implicit grant 2025-11-27).
+  CSRF-protected with a random `state` verified on callback.
+- **Loopback redirect** `http://127.0.0.1:8888/callback`. `localhost` is rejected
+  at config load (Spotify no longer accepts it); the callback server binds to
+  `127.0.0.1` only and handles exactly one request.
+- **Least-privilege scopes** — every scope in [`config.py`](src/local_mood_mcp/config.py)
+  maps to an endpoint this server actually calls; nothing is requested "just in case".
+- **Tokens stored securely:** OS keyring (macOS Keychain / libsecret / Windows
+  Credential Locker) by default; encrypted-file fallback (Fernet, key in keyring,
+  `0600`) only if no keyring exists — with a loud warning. Tokens are never logged.
+- Client secret is **optional** (PKCE needs only the client id). Secrets and local
+  state (`~/.local-mood-mcp`) are kept out of the repo.
+
 ## Why behavioral moods?
 
 <details>
@@ -152,6 +196,7 @@ We confirmed the following **against a live new app**, not just the docs:
 | `GET /artists/{id}`, `GET /tracks/{id}` (**single** reads) | OK |
 | Release **era**, **explicit**, **duration**, IDs/names/URIs | OK |
 | Your **top tracks** (3 ranges), **recently-played**, **saved library** | OK |
+| Raw play history | **capped at the last ~50 plays** — no paging further back |
 
 The upshot: **there is no genre or audio signal available to a new app**, so the
 usual "mood = valence/energy/genre" approach is impossible. Instead, mood is
@@ -160,19 +205,24 @@ defined by **how you actually listen** — affinity, recency, era, length, and
 
 </details>
 
-## Limitations (by API, stated honestly)
+## Limitations (stated honestly)
 
+- **No discovery** — this re-curates what you've already played; it cannot
+  suggest unheard music (the recommendations endpoint is dead for new apps).
 - **No genre or acoustic mood** — Spotify exposes neither to new apps. Mood is
   behavioral/temporal/era-based, deliberately transparent rather than a black box.
 - **No "entire" history via the API** — recently-played caps at ~50 and there's
   no full-stream endpoint. `import_extended_history` is the only lifetime path.
+- **Hour-of-day buckets use your machine's current timezone** — plays made in
+  other timezones (or across DST shifts) are bucketed by today's clock, not the
+  clock where you listened.
 - **Playback requires Premium** and an active Connect device.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest -q            # 16 determinism + selection tests, no network
+pytest -q            # determinism + selection tests, synthetic data, no network
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow.
