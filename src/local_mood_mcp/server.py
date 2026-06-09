@@ -296,6 +296,36 @@ def generate_playlist(
 
 
 @mcp.tool()
+def compare_memory(
+    mood: str,
+    count: int = 25,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    exclude_explicit: bool = False,
+    min_duration_ms: int | None = None,
+    max_duration_ms: int | None = None,
+    require_affinity: bool = False,
+    familiarity_weight: float = 0.25,
+) -> dict:
+    """Run the memory experiment as one command: select the SAME mood twice —
+    once with long-term memory, once as if only the API window existed (tracks
+    the API never surfaced removed, behavioral signals zeroed) — and return
+    both lists plus the diff (overlap, picks only memory finds, summary).
+    For lifetime moods the without-memory side is impossible by construction,
+    which is the point. Deterministic; creates nothing on Spotify."""
+    try:
+        settings = _settings()
+        library = _require_library(settings)
+        filters = _build_filters(
+            min_year, max_year, exclude_explicit,
+            min_duration_ms, max_duration_ms, require_affinity, familiarity_weight,
+        )
+        return playlists_mod.compare_memory(library, mood, count=count, filters=filters)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
 def explain_track(track_id: str, mood: str) -> dict:
     """Explain why a specific track (must be in the cached library) scores the way
     it does for a given mood — the full component breakdown."""
