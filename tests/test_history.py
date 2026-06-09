@@ -1,10 +1,16 @@
-"""Memory persistence and export parsing — synthetic data, no network."""
+"""Memory persistence, metrics, and export parsing — synthetic data, no network."""
 
 import json
 
-from local_mood_mcp.history import carry_over_lifetime, parse_extended_history
+from local_mood_mcp.history import (
+    carry_over_lifetime,
+    memory_impact,
+    parse_extended_history,
+)
 from local_mood_mcp.models import TIER_SHORT, Track
 from local_mood_mcp.store import Library
+
+_DAY_MS = 86_400_000
 
 
 def _t(id_, **kw):
@@ -35,6 +41,40 @@ def test_carry_over_with_no_previous_library():
     fresh = Library(tracks=[_t("a" * 22)])
     assert carry_over_lifetime(None, fresh) == 0
     assert len(fresh.tracks) == 1
+
+
+def test_memory_impact_quantifies_the_delta():
+    lib = Library(
+        tracks=[
+            _t("a" * 22, sources=["top_short_term", "extended_history"],
+               lifetime_plays=400, first_play_ms=0,
+               last_played_ms=int(2 * 365.25 * _DAY_MS)),  # 2 years of history
+            _t("b" * 22, sources=["extended_history"], lifetime_plays=100,
+               first_play_ms=_DAY_MS),  # invisible to the API window
+            _t("c" * 22, sources=["saved"]),  # API-only, no behavior
+        ],
+        sources_summary={"recently_played": 50},
+    )
+    impact = memory_impact(lib)
+    assert impact["long_term_memory"]["loaded"] is True
+    assert impact["long_term_memory"]["streams_remembered"] == 500
+    assert impact["long_term_memory"]["tracks_with_behavioral_profile"] == 2
+    assert impact["long_term_memory"]["tracks_invisible_to_api_window"] == 1
+    assert impact["long_term_memory"]["years_of_history"] == 2.0
+    assert impact["memory_multiplier"] == 10.0  # 500 streams vs 50-play window
+    assert impact["moods_unlocked"] == impact["moods_total"] == 16
+
+
+def test_memory_impact_without_memory():
+    lib = Library(
+        tracks=[_t("a" * 22, sources=["top_short_term"])],
+        sources_summary={"recently_played": 50},
+    )
+    impact = memory_impact(lib)
+    assert impact["long_term_memory"]["loaded"] is False
+    assert impact["long_term_memory"]["streams_remembered"] == 0
+    assert impact["memory_multiplier"] is None
+    assert impact["moods_unlocked"] == 9  # instant moods only
 
 
 def test_parse_aggregates_and_reports_skipped_files(tmp_path):

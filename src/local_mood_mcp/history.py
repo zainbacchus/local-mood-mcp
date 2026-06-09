@@ -27,14 +27,18 @@ from datetime import datetime
 from pathlib import Path
 
 from .models import (
+    API_SOURCES,
     TIER_LONG,
     TIER_MEDIUM,
     TIER_SHORT,
     Track,
     parse_year,
 )
+from .moods import MOODS
 from .spotify_client import SpotifyAPIError, SpotifyClient
 from .store import Library, now_seconds
+
+_DAY_MS = 86_400_000
 
 _TIME_RANGES = (TIER_SHORT, TIER_MEDIUM, TIER_LONG)
 _DELIBERATE_STARTS = {"clickrow", "playbtn"}
@@ -262,6 +266,49 @@ async def merge_extended_history(
         "unknown_tracks_dropped": len(unknown_all) - added,
         "files_skipped": files_skipped,
         "total_streams_parsed": sum(t.lifetime_plays for t in parsed.values()),
+    }
+
+
+def memory_impact(library: Library) -> dict:
+    """Quantify what long-term memory adds over the live API window.
+
+    Pure accounting over the cached library — this is what lets the README's
+    thesis be stated with numbers: how much listening the API window exposes
+    vs. how much the imported/journaled memory remembers.
+    """
+    tracks = library.tracks
+    lifetime_tracks = [t for t in tracks if t.has_lifetime]
+    invisible = [t for t in tracks if not any(s in API_SOURCES for s in t.sources)]
+    streams_remembered = sum(t.lifetime_plays for t in lifetime_tracks)
+    firsts = [t.first_play_ms for t in lifetime_tracks if t.first_play_ms]
+    lasts = [t.last_played_ms for t in lifetime_tracks if t.last_played_ms]
+    years = 0.0
+    if firsts and lasts:
+        span_ms = max(lasts) - min(firsts)
+        if span_ms > 0:
+            years = round(span_ms / (365.25 * _DAY_MS), 1)
+    api_recent = library.sources_summary.get("recently_played", 0)
+    instant_moods = sum(1 for m in MOODS.values() if not m.requires_lifetime)
+    loaded = bool(lifetime_tracks)
+    return {
+        "api_window": {
+            "recently_played_streams_visible": api_recent,
+            "recently_played_hard_cap": 50,
+            "note": "The API exposes ~50 recent plays plus 3x50 unexplained "
+                    "top-track summaries. Everything beyond that is memory.",
+        },
+        "long_term_memory": {
+            "loaded": loaded,
+            "streams_remembered": streams_remembered,
+            "tracks_with_behavioral_profile": len(lifetime_tracks),
+            "years_of_history": years,
+            "tracks_invisible_to_api_window": len(invisible),
+        },
+        "memory_multiplier": (
+            round(streams_remembered / api_recent, 1) if loaded and api_recent else None
+        ),
+        "moods_unlocked": len(MOODS) if loaded else instant_moods,
+        "moods_total": len(MOODS),
     }
 
 

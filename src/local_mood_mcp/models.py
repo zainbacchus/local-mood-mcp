@@ -23,6 +23,12 @@ TIER_SHORT = "short_term"
 TIER_MEDIUM = "medium_term"
 TIER_LONG = "long_term"
 
+# Source tags the live API window can contribute. Anything outside this set
+# ("extended_history", "journal") exists only because of long-term memory.
+API_SOURCES = frozenset(
+    {"top_short_term", "top_medium_term", "top_long_term", "recently_played", "saved"}
+)
+
 
 def parse_year(release_date: str | None) -> int | None:
     if not release_date:

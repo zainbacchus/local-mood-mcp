@@ -216,6 +216,7 @@ def library_stats() -> dict:
             "lifetime_loaded": with_lifetime > 0,
             "tracks_with_lifetime_data": with_lifetime,
             "total_lifetime_plays": sum(t.lifetime_plays for t in lib.tracks),
+            "memory_impact": history_mod.memory_impact(lib),
         }
     except Exception as e:
         return _err(e)
