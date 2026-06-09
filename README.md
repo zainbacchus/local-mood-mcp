@@ -11,7 +11,7 @@
 **local-mood-mcp** is an [MCP](https://modelcontextprotocol.io) server that
 builds deterministic, behavior-based Spotify playlists — and controls playback —
 from Claude or any MCP client. It was built to demonstrate one idea:
-**personalization quality is a function of memory.** The scoring code never
+**quality is a function of memory.** The scoring code never
 changes; the only variable is how much of your listening history it can see.
 Given identical developer constraints, adding memory turns a 50-play window
 into years of behavioral signal — unlocking playlist types and explanations
