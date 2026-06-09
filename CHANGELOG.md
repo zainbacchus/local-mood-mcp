@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `compare_memory` tool: the README's experiment as one command — the same
+  mood selected with long-term memory and as if only the API window existed,
+  plus the diff (overlap, picks only memory finds, one-line verdict).
+- `memory_impact` metrics in `library_stats`: streams remembered vs. the
+  ~50-play API window (`memory_multiplier`), years of history, tracks with
+  behavioral profiles, tracks invisible to the API window, moods unlocked.
+- Incremental memory: every sync journals the API's recently-played window
+  into a local append-only play log and folds it into lifetime signals
+  exactly once — memory accrues between (or without) exports and never
+  double-counts when an export lands.
+
 ### Fixed
 - Lifetime behavior from an imported Extended Streaming History export is now
   **preserved across `sync_listening_history` runs**. Previously a re-sync

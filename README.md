@@ -41,6 +41,16 @@ Both tiers run the exact same selection algorithm
 **informationally impossible** without the export. No amount of cleverness
 recovers a completion ratio or an hour-of-day histogram from a 50-play window.
 
+You don't have to take the table's word for it — the experiment is a tool:
+
+- **`compare_memory(mood)`** runs the identical selection twice, with memory
+  and as if only the API window existed, and returns both lists plus the diff
+  ("14 of 25 picks change when memory is removed" — or, for lifetime moods,
+  "impossible without memory").
+- **`library_stats`** quantifies the gap with your own numbers: streams
+  remembered vs. the 50-play window (`memory_multiplier`), years of history
+  covered, and how much of your library the API can't even see.
+
 A real `why`, from `explain_track` (illustrative values — only possible with
 the export loaded):
 
@@ -145,6 +155,13 @@ Once imported, the memory is durable: **lifetime behavior survives re-syncs**,
 and the import report tells you if any files were skipped or tracks dropped, so
 truncated memory is visible rather than silent.
 
+Memory also **accrues without the export**: every sync journals the API's
+~50-play window into a local, append-only play log
+(`~/.local-mood-mcp/play_journal.jsonl`), and folds it into lifetime signals
+exactly once — so the system keeps remembering from the day you install, and
+never double-counts when an export lands. A small window is enough *if you
+journal what passes through it.*
+
 The export's personal data (IPs, timestamps) is created `0700` and is never
 committed. Until the export arrives, instant moods work fully.
 
@@ -153,12 +170,13 @@ committed. Until the export arrives, instant moods work fully.
 | Tool | What it does |
 |------|--------------|
 | `spotify_auth_status` | Auth state + token expiry (no login side-effect) |
-| `sync_listening_history` | Pull + analyze + cache your history (instant signals; preserves lifetime data) |
+| `sync_listening_history` | Pull + analyze + cache your history; journals plays and preserves lifetime data |
 | `import_extended_history` | Fold in lifetime behavior from the official export (defaults to the drop folder) |
 | `extended_history_status` | Show the drop folder, detected files, and whether lifetime data is loaded |
-| `library_stats` | Track count, affinity tiers, era distribution, lifetime status |
+| `library_stats` | Track count, tiers, eras — plus `memory_impact` metrics (memory vs. the API window) |
 | `list_moods` | The moods, each marked instant vs. needs-export |
 | `generate_playlist` | **Deterministic** selection → preview of exact track IDs + rationale |
+| `compare_memory` | **The experiment**: same mood with vs. without memory, plus the diff |
 | `explain_track` | Why a track scores as it does for a mood |
 | `create_playlist` | Create a playlist from **exact** track IDs |
 | `create_mood_playlist` | Select for a mood and create, in one step (still ID-based) |
