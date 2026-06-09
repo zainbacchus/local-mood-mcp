@@ -113,7 +113,8 @@ fully. You can also point at any path: `import_extended_history("/some/path")`.
 |------|--------------|
 | `spotify_auth_status` | Auth state + token expiry (no login side-effect) |
 | `sync_listening_history` | Pull + analyze + cache your history (instant signals) |
-| `import_extended_history` | Fold in lifetime behavior from the official export |
+| `import_extended_history` | Fold in lifetime behavior from the official export (defaults to the drop folder) |
+| `extended_history_status` | Show the drop folder, detected files, and whether lifetime data is loaded |
 | `library_stats` | Track count, affinity tiers, era distribution, lifetime status |
 | `list_moods` | The moods, each marked instant vs. needs-export |
 | `generate_playlist` | **Deterministic** selection → preview of exact track IDs + rationale |
