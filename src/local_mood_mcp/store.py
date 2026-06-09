@@ -1,9 +1,10 @@
 """Local persistence of the analyzed listening library.
 
-A single JSON document under the state dir holds the deduped, genre-enriched
-Track set plus metadata about when/how it was built. Written atomically with
-0600 permissions. This is *derived* data (not secrets), but we keep it private
-to the user anyway.
+A single JSON document under the state dir holds the deduped, behavioral Track
+set (affinity tiers, recency, and — once imported — lifetime listening signals)
+plus metadata about when/how it was built. Written atomically with 0600
+permissions. This is *derived* data (not secrets), but we keep it private to the
+user anyway.
 """
 
 from __future__ import annotations

@@ -65,11 +65,17 @@ class Context:
         return _clamp01(age_days / (365.0 * years))
 
 
-def build_context(tracks: list[Track]) -> Context:
-    now_ms = int(datetime.now().timestamp() * 1000)
+def build_context(tracks: list[Track], *, now_ms: int | None = None) -> Context:
+    """Build the per-run normalization context.
+
+    `now_ms` defaults to the wall clock; pass a fixed value to make recency- and
+    loyalty-based moods (current_rotation, on_repeat, ...) reproducible at a
+    chosen instant — selection is otherwise time-dependent for those moods.
+    """
+    now = datetime.fromtimestamp(now_ms / 1000) if now_ms is not None else datetime.now()
     return Context(
-        now_ms=now_ms,
-        now_year=datetime.now().year,
+        now_ms=int(now.timestamp() * 1000),
+        now_year=now.year,
         max_lifetime_plays=max((t.lifetime_plays for t in tracks), default=0),
         max_affinity=max((t.affinity_plays for t in tracks), default=0),
         has_lifetime=any(t.has_lifetime for t in tracks),
@@ -77,12 +83,6 @@ def build_context(tracks: list[Track]) -> Context:
 
 
 # --- scoring primitives -----------------------------------------------------
-def _tier(t: Track, want: str, partial: float = 0.5) -> float:
-    if want in t.top_tiers:
-        return 1.0
-    return partial if (TIER_MEDIUM in t.top_tiers or TIER_SHORT in t.top_tiers) else 0.0
-
-
 def _blend(comps: dict[str, float], weights: dict[str, float]) -> float:
     tot = sum(weights.values()) or 1.0
     return _clamp01(sum(comps[k] * weights[k] for k in comps) / tot)

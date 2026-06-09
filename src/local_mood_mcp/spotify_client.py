@@ -6,7 +6,6 @@ Scope of endpoints (all confirmed available to new apps as of 2026):
   GET  /me/player/recently-played
   GET  /me/tracks                   (saved library)
   GET  /tracks/{id}                 (single-track era/explicit/duration)
-  GET  /me/playlists
   POST /users/{id}/playlists        POST /playlists/{id}/tracks
   GET  /me/player/devices
   GET  /me/player                   PUT /me/player/play  PUT /me/player/pause
@@ -30,7 +29,7 @@ from typing import Any
 
 import httpx
 
-from .auth import AuthError, ensure_access_token
+from .auth import AuthError, ensure_access_token, refresh as _refresh
 from .config import API_BASE, Settings
 from .tokenstore import TokenStore
 
@@ -77,13 +76,12 @@ class SpotifyClient:
             resp = await self._client.request(
                 method, path, params=params, json=json, headers=headers
             )
-            if resp.status_code == 401 and not refreshed:
-                # Force a refresh by clearing expiry locally, then retry once.
-                refreshed = True
-                bundle = self._store.load()
+            if resp.status_code == 401:
+                # Refresh once and retry; if it was already refreshed (or there's
+                # no refresh token), the stored credentials are stale.
+                bundle = self._store.load() if not refreshed else None
                 if bundle and bundle.refresh_token:
-                    from .auth import refresh as _refresh
-
+                    refreshed = True
                     self._store.save(_refresh(self._settings, bundle.refresh_token))
                     continue
                 raise AuthError("Unauthorized and unable to refresh; please log in again.")
@@ -147,9 +145,6 @@ class SpotifyClient:
 
     async def saved_tracks(self, cap: int = 2000) -> list[dict]:
         return await self.get_all("/me/tracks", cap=cap)
-
-    async def my_playlists(self, cap: int = 200) -> list[dict]:
-        return await self.get_all("/me/playlists", cap=cap)
 
     async def create_playlist(
         self, user_id: str, name: str, *, public: bool, description: str

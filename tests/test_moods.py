@@ -185,3 +185,14 @@ def test_validate_track_ids_accepts_uri_url_and_dedupes():
 def test_validate_rejects_garbage():
     with pytest.raises(ValueError):
         validate_track_ids(["not-a-valid-id"])
+
+
+def test_build_context_honors_pinned_now():
+    lib = _instant_library()
+    pinned = 1_700_000_000_000  # fixed instant -> reproducible recency/era
+    ctx_a = build_context(lib.tracks, now_ms=pinned)
+    ctx_b = build_context(lib.tracks, now_ms=pinned)
+    assert ctx_a.now_ms == ctx_b.now_ms == pinned
+    recent = next(t for t in lib.tracks if t.id.startswith("a"))
+    recent.last_played_ms = pinned - 5 * 86_400_000  # 5 days before pinned now
+    assert score_track(recent, "current_rotation", ctx_a) == score_track(recent, "current_rotation", ctx_b)

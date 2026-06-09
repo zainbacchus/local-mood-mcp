@@ -14,7 +14,6 @@ from __future__ import annotations
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -22,7 +21,6 @@ from . import history as history_mod
 from . import moods as moods_mod
 from . import playback as playback_mod
 from . import playlists as playlists_mod
-from .auth import AuthError
 from .config import Settings, load_settings
 from .spotify_client import SpotifyClient
 from .store import Library, load_library, save_library
@@ -115,7 +113,7 @@ async def sync_listening_history(saved_cap: int = 2000, auto_import_history: boo
                 )
             save_library(settings.library_path, library)
             return result
-    except (AuthError, Exception) as e:
+    except Exception as e:
         return _err(e)
 
 

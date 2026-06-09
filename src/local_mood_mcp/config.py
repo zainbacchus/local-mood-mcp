@@ -27,11 +27,12 @@ AUTHORIZE_URL = f"{ACCOUNTS_BASE}/authorize"
 TOKEN_URL = f"{ACCOUNTS_BASE}/api/token"
 API_BASE = "https://api.spotify.com/v1"
 
-# Least-privilege scopes. Each is requested explicitly and justified:
-#   user-top-read              -> /me/top/{tracks,artists}
+# Least-privilege scopes. Each is requested explicitly and justified, and each
+# maps to an endpoint this server actually calls — nothing is requested "just in
+# case":
+#   user-top-read              -> /me/top/tracks
 #   user-read-recently-played  -> /me/player/recently-played
 #   user-library-read          -> /me/tracks (saved library)
-#   playlist-read-private      -> read user's playlists (for dedupe / context)
 #   playlist-modify-private    -> create private playlists by exact IDs
 #   playlist-modify-public     -> create public playlists by exact IDs
 #   user-read-playback-state   -> list devices / current playback
@@ -40,7 +41,6 @@ SCOPES: tuple[str, ...] = (
     "user-top-read",
     "user-read-recently-played",
     "user-library-read",
-    "playlist-read-private",
     "playlist-modify-private",
     "playlist-modify-public",
     "user-read-playback-state",
@@ -60,20 +60,36 @@ def _state_dir() -> Path:
     return base
 
 
-def _repo_root() -> Path:
-    # config.py lives at <root>/src/local_mood_mcp/config.py
-    return Path(__file__).resolve().parents[2]
+def _repo_checkout_root() -> Path | None:
+    """Return the repo root IFF we're running from a source checkout.
+
+    config.py lives at <root>/src/local_mood_mcp/config.py, so parents[2] is the
+    repo root when developing. When pip-installed it points inside site-packages
+    (no pyproject.toml there), in which case we return None so the drop folder
+    falls back to the per-user state dir instead of polluting site-packages.
+    """
+    root = Path(__file__).resolve().parents[2]
+    return root if (root / "pyproject.toml").exists() else None
 
 
 def _history_dir() -> Path:
     """Folder where the user drops their Extended Streaming History export.
 
-    Defaults to `<repo>/extended_history`, overridable with
-    LOCAL_MOOD_HISTORY_DIR. Created mode 0700 because the export contains
-    personal data (IP addresses, timestamps). It is git-ignored.
+    Resolution order:
+      1. LOCAL_MOOD_HISTORY_DIR if set.
+      2. `<repo>/extended_history` when running from a source checkout.
+      3. `<state_dir>/extended_history` otherwise (e.g. pip-installed).
+    Created mode 0700 because the export contains personal data (IP addresses,
+    timestamps). The repo folder is git-ignored; the state-dir folder lives
+    entirely outside any repo.
     """
     raw = os.environ.get("LOCAL_MOOD_HISTORY_DIR")
-    path = Path(raw).expanduser() if raw else _repo_root() / "extended_history"
+    if raw:
+        path = Path(raw).expanduser()
+    elif (checkout := _repo_checkout_root()) is not None:
+        path = checkout / "extended_history"
+    else:
+        path = _state_dir() / "extended_history"
     try:
         path.mkdir(parents=True, exist_ok=True)
         path.chmod(0o700)
