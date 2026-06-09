@@ -29,6 +29,8 @@ class Library:
     # imported export; journal_through_ms = newest journaled play folded in.
     lifetime_through_ms: int | None = None
     journal_through_ms: int | None = None
+    # Semantic-memory provenance: who labeled and when (annotate_tracks).
+    annotation_meta: dict = field(default_factory=dict)
 
     def by_id(self) -> dict[str, Track]:
         return {t.id: t for t in self.tracks}
@@ -41,6 +43,7 @@ class Library:
             "sources_summary": self.sources_summary,
             "lifetime_through_ms": self.lifetime_through_ms,
             "journal_through_ms": self.journal_through_ms,
+            "annotation_meta": self.annotation_meta,
             "tracks": [t.to_dict() for t in self.tracks],
         }
 
@@ -53,6 +56,7 @@ class Library:
             user_id=d.get("user_id", ""),
             lifetime_through_ms=d.get("lifetime_through_ms"),
             journal_through_ms=d.get("journal_through_ms"),
+            annotation_meta=dict(d.get("annotation_meta", {})),
         )
 
 

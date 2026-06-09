@@ -27,6 +27,10 @@ class LifetimeRequiredError(RuntimeError):
     """A lifetime mood was requested but no Extended Streaming History is loaded."""
 
 
+class AnnotationsRequiredError(RuntimeError):
+    """An emotional mood was requested but no semantic labels exist yet."""
+
+
 @dataclass(frozen=True)
 class Filters:
     min_year: int | None = None
@@ -76,6 +80,12 @@ def select_for_mood(
             "history', then run import_extended_history. Until then, use an "
             "instant mood (e.g. current_rotation, all_time_favorites, throwback)."
         )
+    if mood.requires_annotations and not ctx.has_annotations:
+        raise AnnotationsRequiredError(
+            f"Mood {mood.key!r} needs semantic labels and none exist yet. Have "
+            "your MCP client label the library: call list_library_tracks, judge "
+            "each track it knows, then annotate_tracks({track_id: [labels]})."
+        )
 
     fam_w = max(0.0, min(1.0, f.familiarity_weight))
     scored: list[Selection] = []
@@ -83,6 +93,10 @@ def select_for_mood(
         if not _passes(t, f):
             continue
         ms, comps = score_track(t, mood, ctx)
+        # Emotional moods are hard-membership: a track the label doesn't cover
+        # is never used as filler, no matter its affinity.
+        if mood.requires_annotations and ms <= 0:
+            continue
         final = (1.0 - fam_w) * ms + fam_w * ctx.affinity_norm(t)
         scored.append(Selection(track=t, mood_score=ms, final_score=final, components=comps))
 
@@ -110,6 +124,7 @@ def selection_to_preview(selections: list[Selection]) -> list[dict]:
             "top_tiers": s.track.top_tiers,
             "affinity_plays": s.track.affinity_plays,
             "lifetime_plays": s.track.lifetime_plays,
+            "emotions": s.track.emotions,
             "mood_score": round(s.mood_score, 4),
             "final_score": round(s.final_score, 4),
             "why": {k: round(v, 4) for k, v in s.components.items()},
@@ -164,12 +179,16 @@ def compare_memory(
         "with_memory": {"count": len(with_prev), "tracks": with_prev},
     }
 
-    if spec.requires_lifetime:
-        result["without_memory"] = {
-            "available": False,
-            "reason": "This mood cannot be computed from the API window at all — "
-                      "it only exists with long-term memory.",
-        }
+    if spec.requires_lifetime or spec.requires_annotations:
+        reason = (
+            "This mood cannot be computed from the API window at all — "
+            "it only exists with long-term memory."
+            if spec.requires_lifetime
+            else "Emotional labels are semantic memory. The API window carries "
+                 "no emotional signal and nowhere to store one — without memory "
+                 "there is nothing to hang this mood on."
+        )
+        result["without_memory"] = {"available": False, "reason": reason}
         result["comparison"] = {
             "summary": f"'{spec.key}' is impossible without memory: 0 of "
                        f"{len(with_prev)} picks are reproducible from the API window.",

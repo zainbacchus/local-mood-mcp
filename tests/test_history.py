@@ -64,7 +64,9 @@ def test_memory_impact_quantifies_the_delta():
     assert impact["long_term_memory"]["tracks_invisible_to_api_window"] == 1
     assert impact["long_term_memory"]["years_of_history"] == 2.0
     assert impact["memory_multiplier"] == 10.0  # 500 streams vs 50-play window
-    assert impact["moods_unlocked"] == impact["moods_total"] == 16
+    assert impact["moods_unlocked"] == 16  # instant + lifetime; no labels yet
+    assert impact["moods_total"] == 22
+    assert impact["semantic_memory"]["loaded"] is False
 
 
 def test_memory_impact_without_memory():

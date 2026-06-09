@@ -249,17 +249,76 @@ def library_stats() -> dict:
         return _err(e)
 
 
+# --- semantic memory ----------------------------------------------------------
+@mcp.tool()
+def list_library_tracks(limit: int = 200, offset: int = 0) -> dict:
+    """Page through the cached library (most-listened first): id, name, artists,
+    year, and any emotional labels already stored. This is how the MCP client
+    reads the library in order to label it — call this, judge the tracks you
+    know, then write labels back with annotate_tracks."""
+    try:
+        settings = _settings()
+        library = _require_library(settings)
+        ordered = sorted(library.tracks, key=lambda t: (-t.affinity_plays, t.id))
+        page = ordered[offset : offset + max(0, limit)]
+        return {
+            "total_tracks": len(ordered),
+            "offset": offset,
+            "returned": len(page),
+            "tracks": [
+                {
+                    "id": t.id,
+                    "name": t.name,
+                    "artists": t.artist_names,
+                    "release_year": t.release_year,
+                    "emotions": t.emotions,
+                }
+                for t in page
+            ],
+        }
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def annotate_tracks(
+    labels: dict[str, list[str]], labeled_by: str = "model", replace: bool = False
+) -> dict:
+    """Write emotional labels into the library — the semantic-memory tier.
+    `labels` maps track id (or URI/URL) to a list of emotions from:
+    happy, energetic, motivated, sad, melancholy, calm. Labels are subjective
+    judgments persisted as data: stored once, they survive re-syncs and make
+    the emotional moods (generate_playlist('sad'), ...) fully deterministic.
+    By default new labels merge with existing ones; replace=True overwrites
+    per track. Typical flow: list_library_tracks → judge what you know →
+    annotate_tracks."""
+    try:
+        settings = _settings()
+        library = _require_library(settings)
+        report = history_mod.apply_annotations(
+            library, labels, labeled_by=labeled_by, replace=replace
+        )
+        save_library(settings.library_path, library)
+        return report
+    except Exception as e:
+        return _err(e)
+
+
 # --- moods / generation -----------------------------------------------------
 @mcp.tool()
 def list_moods() -> list[dict] | dict:
-    """List the available behavioral moods. Each is marked whether it works now
-    (instant, from API affinity) or needs the Extended Streaming History export
-    (lifetime moods like morning/on_repeat/comfort)."""
+    """List the available moods across all three memory tiers: instant (API
+    affinity), lifetime (Extended Streaming History export), and emotional
+    (semantic labels via annotate_tracks). Each is marked with what it needs
+    and whether it works right now."""
     try:
         settings = _settings()
         lib = load_library(settings.library_path)
         has_lifetime = bool(lib and any(t.has_lifetime for t in lib.tracks))
-        return moods_mod.list_moods(has_lifetime=has_lifetime)
+        has_annotations = bool(lib and any(t.emotions for t in lib.tracks))
+        return moods_mod.list_moods(
+            has_lifetime=has_lifetime, has_annotations=has_annotations
+        )
     except Exception as e:
         return _err(e)
 
@@ -375,8 +434,10 @@ def explain_track(track_id: str, mood: str) -> dict:
             "affinity_plays": track.affinity_plays,
             "lifetime_plays": track.lifetime_plays,
             "part_of_day": track.part_of_day_shares(),
+            "emotions": track.emotions,
             "mood": spec.key,
             "requires_extended_history": spec.requires_lifetime,
+            "requires_annotations": spec.requires_annotations,
             "score": round(score, 4),
             "components": {k: round(v, 4) for k, v in comps.items()},
         }

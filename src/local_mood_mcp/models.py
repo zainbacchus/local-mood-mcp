@@ -59,6 +59,11 @@ class Track:
     api_recent_plays: int = 0                            # from recently-played
     last_played_ms: int | None = None                    # most recent ts seen
 
+    # --- semantic labels (written by the MCP client via annotate_tracks) ---
+    # The model's world knowledge, persisted: subjective judgments, not
+    # measurements. Subset of moods.EMOTIONS, kept in canonical order.
+    emotions: list[str] = field(default_factory=list)
+
     # --- lifetime behavioral signals (from Extended Streaming History) ---
     lifetime_plays: int = 0
     lifetime_ms_played: int = 0
@@ -136,6 +141,7 @@ class Track:
             "in_saved": self.in_saved,
             "api_recent_plays": self.api_recent_plays,
             "last_played_ms": self.last_played_ms,
+            "emotions": self.emotions,
             "lifetime_plays": self.lifetime_plays,
             "lifetime_ms_played": self.lifetime_ms_played,
             "completions": self.completions,
@@ -165,6 +171,7 @@ class Track:
             in_saved=bool(d.get("in_saved", False)),
             api_recent_plays=int(d.get("api_recent_plays", 0)),
             last_played_ms=d.get("last_played_ms"),
+            emotions=list(d.get("emotions", [])),
             lifetime_plays=int(d.get("lifetime_plays", 0)),
             lifetime_ms_played=int(d.get("lifetime_ms_played", 0)),
             completions=int(d.get("completions", 0)),

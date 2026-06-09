@@ -11,6 +11,14 @@ actually listen plus the little metadata that survives (era, explicit, length):
   LIFETIME moods (need the Extended Streaming History export):
     morning, late_night, weekend, on_repeat, comfort, focus_flow, deep_cuts
 
+  EMOTIONAL moods (need semantic labels written via annotate_tracks):
+    happy, sad, energetic, motivated, melancholy, calm
+
+The emotional tier is semantic memory: the MCP client (the model) labels
+tracks it knows, once, and the labels persist in the library. They are
+subjective judgments — not measurements — and the scorers say so. Once stored,
+selection over them is exactly as deterministic as everything else.
+
 Every scorer is a pure function of (Track, Context) returning a value in [0, 1]
 plus a component breakdown, so selections are auditable and identical on every
 run with the same library.
@@ -27,6 +35,10 @@ from .models import TIER_LONG, TIER_MEDIUM, TIER_SHORT, Track
 
 _DAY_MS = 86_400_000
 
+# The semantic-label vocabulary. Three up, three down; "chill" is deliberately
+# absent — it would be the same playlist as "calm".
+EMOTIONS: tuple[str, ...] = ("happy", "energetic", "motivated", "sad", "melancholy", "calm")
+
 
 def _clamp01(x: float) -> float:
     return 0.0 if x < 0 else 1.0 if x > 1 else x
@@ -41,6 +53,7 @@ class Context:
     max_lifetime_plays: int
     max_affinity: int
     has_lifetime: bool
+    has_annotations: bool = False
 
     def affinity_norm(self, t: Track) -> float:
         if self.max_affinity <= 0:
@@ -79,6 +92,7 @@ def build_context(tracks: list[Track], *, now_ms: int | None = None) -> Context:
         max_lifetime_plays=max((t.lifetime_plays for t in tracks), default=0),
         max_affinity=max((t.affinity_plays for t in tracks), default=0),
         has_lifetime=any(t.has_lifetime for t in tracks),
+        has_annotations=any(t.emotions for t in tracks),
     )
 
 
@@ -213,6 +227,24 @@ def _deep_cuts(t: Track, ctx: Context) -> tuple[float, dict]:
     return _blend(c, {"under_played": 0.5, "quality": 0.5}), c
 
 
+def _emotion_scorer(emotion: str) -> Callable[[Track, Context], tuple[float, dict]]:
+    """Score by stored semantic label, differentiated by listening affinity.
+
+    The label is binary membership (the model either called it `emotion` or
+    didn't); within the labeled set, how much you actually listen breaks ties.
+    Unlabeled tracks score 0 and are excluded from selection entirely — an
+    emotional playlist is never padded with tracks the label doesn't cover.
+    """
+
+    def scorer(t: Track, ctx: Context) -> tuple[float, dict]:
+        if emotion not in t.emotions:
+            return 0.0, {"emotion_match": 0.0, "affinity": ctx.affinity_norm(t)}
+        c = {"emotion_match": 1.0, "affinity": ctx.affinity_norm(t)}
+        return _blend(c, {"emotion_match": 0.7, "affinity": 0.3}), c
+
+    return scorer
+
+
 @dataclass(frozen=True)
 class MoodSpec:
     key: str
@@ -220,6 +252,7 @@ class MoodSpec:
     description: str
     requires_lifetime: bool
     scorer: Callable[[Track, Context], tuple[float, dict]]
+    requires_annotations: bool = False
 
 
 MOODS: dict[str, MoodSpec] = {
@@ -256,18 +289,43 @@ MOODS: dict[str, MoodSpec] = {
         "Deliberately chosen tracks you play through without skipping.", True, _focus_flow),
     "deep_cuts": MoodSpec("deep_cuts", "Deep Cuts",
         "Under-played gems you finish when they come on.", True, _deep_cuts),
+    # emotional (semantic labels via annotate_tracks)
+    "happy": MoodSpec("happy", "Happy",
+        "Bright, feel-good tracks — from your semantic labels.", False,
+        _emotion_scorer("happy"), requires_annotations=True),
+    "energetic": MoodSpec("energetic", "Energetic",
+        "High-energy tracks for momentum.", False,
+        _emotion_scorer("energetic"), requires_annotations=True),
+    "motivated": MoodSpec("motivated", "Motivated",
+        "Drive and determination — push-through energy.", False,
+        _emotion_scorer("motivated"), requires_annotations=True),
+    "sad": MoodSpec("sad", "Sad",
+        "Openly sorrowful tracks — from your semantic labels.", False,
+        _emotion_scorer("sad"), requires_annotations=True),
+    "melancholy": MoodSpec("melancholy", "Melancholy",
+        "Bittersweet, wistful, reflective — sadness with warmth.", False,
+        _emotion_scorer("melancholy"), requires_annotations=True),
+    "calm": MoodSpec("calm", "Calm",
+        "Peaceful, soothing, low-intensity (covers 'chill').", False,
+        _emotion_scorer("calm"), requires_annotations=True),
 }
 
 
-def list_moods(*, has_lifetime: bool | None = None) -> list[dict]:
+def list_moods(
+    *, has_lifetime: bool | None = None, has_annotations: bool | None = None
+) -> list[dict]:
     out = []
     for m in MOODS.values():
+        available = ((not m.requires_lifetime) or bool(has_lifetime)) and (
+            (not m.requires_annotations) or bool(has_annotations)
+        )
         out.append({
             "key": m.key,
             "label": m.label,
             "description": m.description,
             "requires_extended_history": m.requires_lifetime,
-            "available_now": (not m.requires_lifetime) or bool(has_lifetime),
+            "requires_annotations": m.requires_annotations,
+            "available_now": available,
         })
     return out
 

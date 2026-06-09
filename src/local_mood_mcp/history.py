@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +35,7 @@ from .models import (
     Track,
     parse_year,
 )
-from .moods import MOODS
+from .moods import EMOTIONS, MOODS
 from .spotify_client import SpotifyAPIError, SpotifyClient
 from .store import Library, now_seconds
 
@@ -301,8 +302,16 @@ def memory_impact(library: Library) -> dict:
         if span_ms > 0:
             years = round(span_ms / (365.25 * _DAY_MS), 1)
     api_recent = library.sources_summary.get("recently_played", 0)
-    instant_moods = sum(1 for m in MOODS.values() if not m.requires_lifetime)
+    lifetime_moods = sum(1 for m in MOODS.values() if m.requires_lifetime)
+    emotional_moods = sum(1 for m in MOODS.values() if m.requires_annotations)
+    instant_moods = len(MOODS) - lifetime_moods - emotional_moods
     loaded = bool(lifetime_tracks)
+    labeled = [t for t in tracks if t.emotions]
+    unlocked = (
+        instant_moods
+        + (lifetime_moods if loaded else 0)
+        + (emotional_moods if labeled else 0)
+    )
     return {
         "api_window": {
             "recently_played_streams_visible": api_recent,
@@ -317,41 +326,55 @@ def memory_impact(library: Library) -> dict:
             "years_of_history": years,
             "tracks_invisible_to_api_window": len(invisible),
         },
+        "semantic_memory": {
+            "loaded": bool(labeled),
+            "tracks_labeled": len(labeled),
+            "labels_in_use": sorted({e for t in labeled for e in t.emotions}),
+            "labeled_by": library.annotation_meta.get("labeled_by"),
+        },
         "memory_multiplier": (
             round(streams_remembered / api_recent, 1) if loaded and api_recent else None
         ),
-        "moods_unlocked": len(MOODS) if loaded else instant_moods,
+        "moods_unlocked": unlocked,
         "moods_total": len(MOODS),
     }
 
 
 def carry_over_lifetime(previous: Library | None, fresh: Library) -> int:
-    """Preserve lifetime behavior across re-syncs.
+    """Preserve memory across re-syncs — behavioral and semantic.
 
     build_library only sees the API window (~50 recent plays + top-track
-    summaries); without this, lifetime signals imported from an export would be
-    wiped every time the user re-syncs. Copies behavioral fields onto matching
-    fresh tracks and re-appends export-only tracks that the API window no
-    longer surfaces. Returns the number of tracks whose lifetime data was
-    preserved.
+    summaries); without this, lifetime signals imported from an export and
+    emotional labels written by annotate_tracks would be wiped every time the
+    user re-syncs. Copies behavioral fields and labels onto matching fresh
+    tracks and re-appends remembered tracks the API window no longer surfaces.
+    Returns the number of tracks whose lifetime data was preserved.
     """
     if previous is None:
         return 0
     fresh.lifetime_through_ms = previous.lifetime_through_ms
     fresh.journal_through_ms = previous.journal_through_ms
+    fresh.annotation_meta = dict(previous.annotation_meta)
     by_id = fresh.by_id()
     preserved = 0
     for old in previous.tracks:
-        if not old.has_lifetime:
+        if not old.has_lifetime and not old.emotions:
             continue
         current = by_id.get(old.id)
-        if current is not None:
+        if current is None:
+            fresh.tracks.append(old)
+            by_id[old.id] = old
+            if old.has_lifetime:
+                preserved += 1
+            continue
+        if old.emotions:
+            merged = set(old.emotions) | set(current.emotions)
+            current.emotions = [e for e in EMOTIONS if e in merged]
+        if old.has_lifetime:
             _copy_behavior(old, current)
             if "extended_history" not in current.sources:
                 current.sources.append("extended_history")
-        else:
-            fresh.tracks.append(old)
-        preserved += 1
+            preserved += 1
     return preserved
 
 
@@ -371,6 +394,69 @@ def _copy_behavior(src: Track, dst: Track) -> None:
         dst.name = src.name
     if not dst.artist_names or dst.artist_names == [""]:
         dst.artist_names = src.artist_names
+
+
+# --- semantic memory: labels written by the MCP client -----------------------
+_TRACK_ID_RE = re.compile(r"^[A-Za-z0-9]{22}$")
+
+
+def _normalize_track_id(raw: str) -> str | None:
+    tid = raw.strip()
+    if tid.startswith("spotify:track:"):
+        tid = tid.split(":")[-1]
+    if "open.spotify.com/track/" in tid:
+        tid = tid.rsplit("/", 1)[-1].split("?")[0]
+    return tid if _TRACK_ID_RE.match(tid) else None
+
+
+def apply_annotations(
+    library: Library,
+    labels: dict[str, list[str]],
+    *,
+    labeled_by: str = "model",
+    replace: bool = False,
+) -> dict:
+    """Write emotional labels into the library — the semantic-memory tier.
+
+    Labels are the model's world knowledge persisted as data: subjective
+    judgments, recorded once, deterministic to select over thereafter. Unknown
+    emotions are a hard error (so the caller corrects itself); unknown track
+    ids are skipped and reported. With replace=False (default) new labels merge
+    with existing ones; replace=True overwrites per track.
+    """
+    invalid = sorted({e for ems in labels.values() for e in ems if e not in EMOTIONS})
+    if invalid:
+        raise ValueError(
+            f"Unknown emotion labels {invalid}. Valid labels: {', '.join(EMOTIONS)}."
+        )
+    by_id = library.by_id()
+    labeled = 0
+    skipped: list[str] = []
+    for raw_id, ems in sorted(labels.items()):
+        tid = _normalize_track_id(raw_id)
+        track = by_id.get(tid) if tid else None
+        if track is None:
+            skipped.append(raw_id)
+            continue
+        wanted = set(ems) if replace else set(track.emotions) | set(ems)
+        track.emotions = [e for e in EMOTIONS if e in wanted]  # canonical order
+        labeled += 1
+    tracks_with_labels = sum(1 for t in library.tracks if t.emotions)
+    library.annotation_meta = {
+        "labeled_by": labeled_by,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "tracks_labeled": tracks_with_labels,
+    }
+    label_counts = {
+        e: sum(1 for t in library.tracks if e in t.emotions) for e in EMOTIONS
+    }
+    return {
+        "tracks_labeled_this_call": labeled,
+        "unknown_track_ids_skipped": skipped,
+        "library_coverage": f"{tracks_with_labels}/{len(library.tracks)}",
+        "label_counts": label_counts,
+        "emotional_moods_unlocked": tracks_with_labels > 0,
+    }
 
 
 # --- play journal: memory that accrues between exports ----------------------
