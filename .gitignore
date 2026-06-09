@@ -5,6 +5,12 @@ fkey
 library.json
 tokens.enc
 
+# Extended Streaming History export — PERSONAL DATA (IPs, timestamps). Never commit.
+# Everything in the drop folder is ignored except the README and .gitkeep.
+extended_history/*
+!extended_history/.gitkeep
+!extended_history/README.md
+
 # Python
 .venv/
 __pycache__/

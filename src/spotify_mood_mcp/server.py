@@ -83,49 +83,97 @@ def spotify_auth_status() -> dict:
 
 # --- history ----------------------------------------------------------------
 @mcp.tool()
-async def sync_listening_history(saved_cap: int = 2000) -> dict:
+async def sync_listening_history(saved_cap: int = 2000, auto_import_history: bool = True) -> dict:
     """Fetch and analyze the user's listening history from all available Spotify
     sources (top tracks across short/medium/long term, recently played, and the
-    saved library), enrich every track with artist genres, dedupe, and cache it
-    locally. `saved_cap` bounds how many saved tracks to pull. Returns a summary."""
+    saved library), capture era/explicit/duration, dedupe, and cache it locally.
+    If an Extended Streaming History export has been dropped into the
+    `extended_history/` folder, it is auto-merged (unless auto_import_history is
+    false), unlocking the lifetime moods. `saved_cap` bounds saved-track pulls."""
     try:
         async with _client() as (settings, client):
             library = await history_mod.build_library(client, saved_cap=saved_cap)
-            save_library(settings.library_path, library)
-            return {
+            result = {
                 "tracks_analyzed": len(library.tracks),
-                "sources": library.sources_summary,
-                "with_genres": sum(1 for t in library.tracks if t.genres),
+                "sources": dict(library.sources_summary),
+                "with_release_year": sum(1 for t in library.tracks if t.release_year),
                 "cached_at": settings.library_path.as_posix(),
-                "note": (
-                    "Spotify's API does not expose full lifetime history. For that, "
-                    "use import_extended_history with your downloaded Extended "
-                    "Streaming History export."
-                ),
             }
+            if auto_import_history and settings.has_dropped_history():
+                library, report = await history_mod.merge_extended_history(
+                    client, library, settings.history_dir
+                )
+                result["extended_history_auto_imported"] = report
+                result["lifetime_moods_unlocked"] = True
+            else:
+                result["lifetime_moods_unlocked"] = any(t.has_lifetime for t in library.tracks)
+                result["drop_folder"] = settings.history_dir.as_posix()
+                result["hint"] = (
+                    "Drop your Extended Streaming History JSON files into the folder "
+                    "above (then re-run sync) to unlock lifetime moods like morning, "
+                    "on_repeat, comfort."
+                )
+            save_library(settings.library_path, library)
+            return result
     except (AuthError, Exception) as e:
         return _err(e)
 
 
 @mcp.tool()
-async def import_extended_history(export_path: str, top_n_unknown: int = 150) -> dict:
-    """Fold true lifetime play counts from a Spotify 'Extended Streaming History'
-    export into the cached library. `export_path` may be a single JSON file or the
-    folder of Streaming_History_Audio_*.json files. `top_n_unknown` controls how
-    many never-before-seen lifetime favourites to fetch and add. Run
-    sync_listening_history first."""
+async def import_extended_history(export_path: str | None = None, top_n_unknown: int = 150) -> dict:
+    """Fold true lifetime listening behavior from a Spotify 'Extended Streaming
+    History' export into the cached library, unlocking lifetime moods. With no
+    `export_path`, reads the repo's `extended_history/` drop folder (recursively).
+    Otherwise accepts a single JSON file or any folder. Run sync_listening_history
+    first."""
     try:
         settings = _settings()
         library = _require_library(settings)
-        path = Path(export_path).expanduser()
+        path = Path(export_path).expanduser() if export_path else settings.history_dir
         if not path.exists():
             return {"error": "FileNotFound", "message": f"No such path: {path}"}
+        if path.is_dir() and not any(path.rglob("*.json")):
+            return {
+                "error": "NoFilesFound",
+                "message": f"No .json files in {path}. Drop your unzipped Extended "
+                "Streaming History export there first.",
+                "drop_folder": path.as_posix(),
+            }
         async with _client() as (_s, client):
             library, report = await history_mod.merge_extended_history(
                 client, library, path, top_n_unknown=top_n_unknown
             )
             save_library(settings.library_path, library)
-            return {"tracks_in_library": len(library.tracks), **report}
+            return {
+                "tracks_in_library": len(library.tracks),
+                "lifetime_moods_unlocked": any(t.has_lifetime for t in library.tracks),
+                **report,
+            }
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def extended_history_status() -> dict:
+    """Report the Extended Streaming History drop folder, what files are detected
+    there, and whether lifetime behavioral data is loaded into the library."""
+    try:
+        settings = _settings()
+        files = sorted(p.name for p in settings.history_dir.rglob("*.json"))
+        lib = load_library(settings.library_path)
+        loaded = bool(lib and any(t.has_lifetime for t in lib.tracks))
+        return {
+            "drop_folder": settings.history_dir.as_posix(),
+            "json_files_detected": len(files),
+            "files": files[:50],
+            "lifetime_data_loaded_in_library": loaded,
+            "next_step": (
+                "Run sync_listening_history (auto-imports) or import_extended_history."
+                if files and not loaded else
+                "Drop your unzipped export's JSON files into the folder above."
+                if not files else "Lifetime moods are ready."
+            ),
+        }
     except Exception as e:
         return _err(e)
 

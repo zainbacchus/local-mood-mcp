@@ -136,7 +136,12 @@ def _iso_to_ms(ts: str | None) -> int | None:
 
 # --- Extended Streaming History --------------------------------------------
 def _iter_history_entries(path: Path):
-    files = sorted(path.glob("*.json")) if path.is_dir() else [path]
+    # Accept a single file, or a folder (recursively) — so dropping the whole
+    # unzipped "Spotify Extended Streaming History" folder just works.
+    if path.is_dir():
+        files = sorted(path.rglob("*.json"))
+    else:
+        files = [path]
     for fp in files:
         try:
             data = json.loads(fp.read_text(encoding="utf-8"))

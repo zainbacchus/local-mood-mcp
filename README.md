@@ -97,10 +97,15 @@ official export:
 1. Go to <https://www.spotify.com/account/privacy/> →
    **"Extended streaming history"** → **Request data**.
 2. Spotify emails a download link in **~5 days** (occasionally up to 30).
-3. Unzip it, then point the tool at the folder of
-   `Streaming_History_Audio_*.json` files via `import_extended_history`.
+3. Unzip it and **drop the JSON files into the [`extended_history/`](extended_history/)
+   folder** in this repo (subfolders are scanned recursively).
+4. Run `sync_listening_history` — it **auto-detects and merges** the drop folder
+   and unlocks the lifetime moods. (`import_extended_history` with no argument
+   does the same; `extended_history_status` shows what's detected.)
 
-Until it arrives, the instant moods work fully.
+The drop folder is **git-ignored** — the export's personal data (IPs,
+timestamps) can never be committed. Until the export arrives, instant moods work
+fully. You can also point at any path: `import_extended_history("/some/path")`.
 
 ## Tools exposed
 

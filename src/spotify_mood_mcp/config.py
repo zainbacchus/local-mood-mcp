@@ -60,6 +60,28 @@ def _state_dir() -> Path:
     return base
 
 
+def _repo_root() -> Path:
+    # config.py lives at <root>/src/spotify_mood_mcp/config.py
+    return Path(__file__).resolve().parents[2]
+
+
+def _history_dir() -> Path:
+    """Folder where the user drops their Extended Streaming History export.
+
+    Defaults to `<repo>/extended_history`, overridable with
+    SPOTIFY_MOOD_HISTORY_DIR. Created mode 0700 because the export contains
+    personal data (IP addresses, timestamps). It is git-ignored.
+    """
+    raw = os.environ.get("SPOTIFY_MOOD_HISTORY_DIR")
+    path = Path(raw).expanduser() if raw else _repo_root() / "extended_history"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
+    except OSError:  # pragma: no cover - non-posix
+        pass
+    return path
+
+
 @dataclass(frozen=True)
 class Settings:
     client_id: str
@@ -68,6 +90,7 @@ class Settings:
     redirect_host: str
     redirect_port: int
     state_dir: Path = field(default_factory=_state_dir)
+    history_dir: Path = field(default_factory=_history_dir)
 
     @property
     def is_confidential(self) -> bool:
@@ -76,6 +99,10 @@ class Settings:
     @property
     def library_path(self) -> Path:
         return self.state_dir / "library.json"
+
+    def has_dropped_history(self) -> bool:
+        """True if any JSON files are present in the drop folder (recursively)."""
+        return any(self.history_dir.rglob("*.json"))
 
 
 def _parse_redirect(uri: str) -> tuple[str, int]:
