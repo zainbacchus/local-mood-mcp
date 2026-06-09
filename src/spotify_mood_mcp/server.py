@@ -108,7 +108,7 @@ async def sync_listening_history(saved_cap: int = 2000) -> dict:
 
 
 @mcp.tool()
-async def import_extended_history(export_path: str, top_n_unknown: int = 200) -> dict:
+async def import_extended_history(export_path: str, top_n_unknown: int = 150) -> dict:
     """Fold true lifetime play counts from a Spotify 'Extended Streaming History'
     export into the cached library. `export_path` may be a single JSON file or the
     folder of Streaming_History_Audio_*.json files. `top_n_unknown` controls how
@@ -132,25 +132,37 @@ async def import_extended_history(export_path: str, top_n_unknown: int = 200) ->
 
 @mcp.tool()
 def library_stats() -> dict:
-    """Summarize the locally cached, analyzed library: track count, source
-    breakdown, genre coverage, and when it was built."""
+    """Summarize the locally cached, analyzed library: track count, affinity-tier
+    and source breakdown, era distribution, and whether lifetime (Extended
+    Streaming History) behavioral data is loaded."""
     try:
         settings = _settings()
         lib = load_library(settings.library_path)
         if lib is None:
             return {"exists": False, "how_to_fix": "Run sync_listening_history."}
-        top_genres: dict[str, int] = {}
+        decades: dict[str, int] = {}
         for t in lib.tracks:
-            for g in t.genres:
-                top_genres[g] = top_genres.get(g, 0) + 1
-        ranked = sorted(top_genres.items(), key=lambda kv: (-kv[1], kv[0]))[:20]
+            if t.release_year:
+                d = f"{(t.release_year // 10) * 10}s"
+                decades[d] = decades.get(d, 0) + 1
+        tier_counts = {
+            "short_term": sum(1 for t in lib.tracks if "short_term" in t.top_tiers),
+            "medium_term": sum(1 for t in lib.tracks if "medium_term" in t.top_tiers),
+            "long_term": sum(1 for t in lib.tracks if "long_term" in t.top_tiers),
+            "saved": sum(1 for t in lib.tracks if t.in_saved),
+        }
+        with_lifetime = sum(1 for t in lib.tracks if t.has_lifetime)
         return {
             "exists": True,
             "tracks": len(lib.tracks),
             "built_at_epoch": lib.built_at,
             "sources": lib.sources_summary,
-            "with_genres": sum(1 for t in lib.tracks if t.genres),
-            "top_genres": [{"genre": g, "tracks": n} for g, n in ranked],
+            "affinity_tiers": tier_counts,
+            "with_release_year": sum(1 for t in lib.tracks if t.release_year),
+            "decades": dict(sorted(decades.items())),
+            "lifetime_loaded": with_lifetime > 0,
+            "tracks_with_lifetime_data": with_lifetime,
+            "total_lifetime_plays": sum(t.lifetime_plays for t in lib.tracks),
         }
     except Exception as e:
         return _err(e)
@@ -159,27 +171,31 @@ def library_stats() -> dict:
 # --- moods / generation -----------------------------------------------------
 @mcp.tool()
 def list_moods() -> list[dict]:
-    """List the available moods and the deterministic rules (genre keywords,
-    popularity/era/explicit preferences) that define each one."""
-    return moods_mod.list_moods()
+    """List the available behavioral moods. Each is marked whether it works now
+    (instant, from API affinity) or needs the Extended Streaming History export
+    (lifetime moods like morning/on_repeat/comfort)."""
+    settings = _settings()
+    lib = load_library(settings.library_path)
+    has_lifetime = bool(lib and any(t.has_lifetime for t in lib.tracks))
+    return moods_mod.list_moods(has_lifetime=has_lifetime)
 
 
 def _build_filters(
-    min_popularity: int,
-    max_popularity: int,
     min_year: int | None,
     max_year: int | None,
     exclude_explicit: bool,
-    require_genre_match: bool,
+    min_duration_ms: int | None,
+    max_duration_ms: int | None,
+    require_affinity: bool,
     familiarity_weight: float,
 ) -> "playlists_mod.Filters":
     return playlists_mod.Filters(
-        min_popularity=min_popularity,
-        max_popularity=max_popularity,
         min_year=min_year,
         max_year=max_year,
         exclude_explicit=exclude_explicit,
-        require_genre_match=require_genre_match,
+        min_duration_ms=min_duration_ms,
+        max_duration_ms=max_duration_ms,
+        require_affinity=require_affinity,
         familiarity_weight=familiarity_weight,
     )
 
@@ -188,25 +204,26 @@ def _build_filters(
 def generate_playlist(
     mood: str,
     count: int = 25,
-    min_popularity: int = 0,
-    max_popularity: int = 100,
     min_year: int | None = None,
     max_year: int | None = None,
     exclude_explicit: bool = False,
-    require_genre_match: bool = False,
+    min_duration_ms: int | None = None,
+    max_duration_ms: int | None = None,
+    require_affinity: bool = False,
     familiarity_weight: float = 0.25,
 ) -> dict:
-    """Deterministically select tracks from the cached library for a mood and
-    return a PREVIEW of the exact track IDs (with per-track scoring rationale).
-    This does NOT create anything on Spotify — pass the returned `track_ids` to
-    create_playlist (or play) when you're happy. Re-running with identical
-    parameters returns the identical ordered list."""
+    """Deterministically select tracks from the cached library for a behavioral
+    mood and return a PREVIEW of the exact track IDs (with per-track scoring
+    rationale). This does NOT create anything on Spotify — pass the returned
+    `track_ids` to create_playlist (or play) when you're happy. Re-running with
+    identical parameters returns the identical ordered list. Lifetime moods
+    (morning, on_repeat, comfort, ...) require import_extended_history first."""
     try:
         settings = _settings()
         library = _require_library(settings)
         filters = _build_filters(
-            min_popularity, max_popularity, min_year, max_year,
-            exclude_explicit, require_genre_match, familiarity_weight,
+            min_year, max_year, exclude_explicit,
+            min_duration_ms, max_duration_ms, require_affinity, familiarity_weight,
         )
         sels = playlists_mod.select_for_mood(library, mood, count=count, filters=filters)
         preview = playlists_mod.selection_to_preview(sels)
@@ -232,16 +249,20 @@ def explain_track(track_id: str, mood: str) -> dict:
         if not track:
             return {"error": "NotInLibrary", "message": f"{track_id} not in cached library."}
         spec = moods_mod.get_mood(mood)
-        score, comps = moods_mod.score_track(track, spec)
+        ctx = moods_mod.build_context(library.tracks)
+        score, comps = moods_mod.score_track(track, spec, ctx)
         return {
             "track": track.name,
             "artists": track.artist_names,
-            "genres": track.genres,
-            "popularity": track.popularity,
             "release_year": track.release_year,
             "explicit": track.explicit,
-            "play_count": track.play_count,
+            "duration_ms": track.duration_ms,
+            "top_tiers": track.top_tiers,
+            "affinity_plays": track.affinity_plays,
+            "lifetime_plays": track.lifetime_plays,
+            "part_of_day": track.part_of_day_shares(),
             "mood": spec.key,
+            "requires_extended_history": spec.requires_lifetime,
             "score": round(score, 4),
             "components": {k: round(v, 4) for k, v in comps.items()},
         }
@@ -276,12 +297,12 @@ async def create_mood_playlist(
     count: int = 25,
     public: bool = False,
     description: str = "",
-    min_popularity: int = 0,
-    max_popularity: int = 100,
     min_year: int | None = None,
     max_year: int | None = None,
     exclude_explicit: bool = False,
-    require_genre_match: bool = False,
+    min_duration_ms: int | None = None,
+    max_duration_ms: int | None = None,
+    require_affinity: bool = False,
     familiarity_weight: float = 0.25,
 ) -> dict:
     """Convenience: deterministically select for `mood`, then create the playlist
@@ -291,8 +312,8 @@ async def create_mood_playlist(
         settings = _settings()
         library = _require_library(settings)
         filters = _build_filters(
-            min_popularity, max_popularity, min_year, max_year,
-            exclude_explicit, require_genre_match, familiarity_weight,
+            min_year, max_year, exclude_explicit,
+            min_duration_ms, max_duration_ms, require_affinity, familiarity_weight,
         )
         sels = playlists_mod.select_for_mood(library, mood, count=count, filters=filters)
         ids = [s.track.id for s in sels]

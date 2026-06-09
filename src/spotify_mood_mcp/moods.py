@@ -1,20 +1,216 @@
-"""Deterministic mood taxonomy and scoring.
+"""Deterministic, behavioral mood taxonomy.
 
-Because audio-features is gone, "mood" is inferred from signals that still
-exist: artist **genres**, track **popularity**, release **era**, and the
-**explicit** flag. The mapping is a fixed, transparent table — no model, no
-randomness. The same track always scores the same against the same mood, so
-playlists are reproducible.
+Spotify gives new apps no genres, no popularity, and no audio features in 2026
+(all verified live). So a "mood" here is a reproducible function of how you
+actually listen plus the little metadata that survives (era, explicit, length):
 
-`score_track(track, mood)` returns a float in [0, 1] plus a breakdown that
-`explain` surfaces to the user, so every selection is auditable.
+  INSTANT moods (work from API affinity the moment you sync):
+    current_rotation, steady_favorites, all_time_favorites,
+    throwback, fresh, long_form, quick_hits, clean, explicit
+
+  LIFETIME moods (need the Extended Streaming History export):
+    morning, late_night, weekend, on_repeat, comfort, focus_flow, deep_cuts
+
+Every scorer is a pure function of (Track, Context) returning a value in [0, 1]
+plus a component breakdown, so selections are auditable and identical on every
+run with the same library.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Callable
 
-from .models import Track
+from .models import TIER_LONG, TIER_MEDIUM, TIER_SHORT, Track
+
+_DAY_MS = 86_400_000
+
+
+def _clamp01(x: float) -> float:
+    return 0.0 if x < 0 else 1.0 if x > 1 else x
+
+
+@dataclass
+class Context:
+    """Library-relative normalizers, computed once per scoring run."""
+
+    now_ms: int
+    now_year: int
+    max_lifetime_plays: int
+    max_affinity: int
+    has_lifetime: bool
+
+    def affinity_norm(self, t: Track) -> float:
+        if self.max_affinity <= 0:
+            return 0.0
+        return _clamp01(math.log1p(t.affinity_plays) / math.log1p(self.max_affinity))
+
+    def plays_norm(self, t: Track) -> float:
+        if self.max_lifetime_plays <= 0:
+            return 0.0
+        return _clamp01(math.log1p(t.lifetime_plays) / math.log1p(self.max_lifetime_plays))
+
+    def recency(self, t: Track, *, window_days: int = 30) -> float:
+        if not t.last_played_ms:
+            return 0.0
+        days = (self.now_ms - t.last_played_ms) / _DAY_MS
+        return _clamp01(1.0 - days / window_days)
+
+    def loyalty(self, t: Track, *, years: float = 3.0) -> float:
+        if not t.first_play_ms:
+            return 0.0
+        age_days = (self.now_ms - t.first_play_ms) / _DAY_MS
+        return _clamp01(age_days / (365.0 * years))
+
+
+def build_context(tracks: list[Track]) -> Context:
+    now_ms = int(datetime.now().timestamp() * 1000)
+    return Context(
+        now_ms=now_ms,
+        now_year=datetime.now().year,
+        max_lifetime_plays=max((t.lifetime_plays for t in tracks), default=0),
+        max_affinity=max((t.affinity_plays for t in tracks), default=0),
+        has_lifetime=any(t.has_lifetime for t in tracks),
+    )
+
+
+# --- scoring primitives -----------------------------------------------------
+def _tier(t: Track, want: str, partial: float = 0.5) -> float:
+    if want in t.top_tiers:
+        return 1.0
+    return partial if (TIER_MEDIUM in t.top_tiers or TIER_SHORT in t.top_tiers) else 0.0
+
+
+def _blend(comps: dict[str, float], weights: dict[str, float]) -> float:
+    tot = sum(weights.values()) or 1.0
+    return _clamp01(sum(comps[k] * weights[k] for k in comps) / tot)
+
+
+# --- instant-mode scorers ---------------------------------------------------
+def _current_rotation(t: Track, ctx: Context) -> tuple[float, dict]:
+    c = {
+        "short_term_tier": 1.0 if TIER_SHORT in t.top_tiers else (0.5 if TIER_MEDIUM in t.top_tiers else 0.0),
+        "recency": ctx.recency(t, window_days=30),
+        "recent_plays": _clamp01(t.api_recent_plays / 5.0),
+    }
+    return _blend(c, {"short_term_tier": 0.5, "recency": 0.3, "recent_plays": 0.2}), c
+
+
+def _steady_favorites(t: Track, ctx: Context) -> tuple[float, dict]:
+    c = {
+        "medium_term_tier": 1.0 if TIER_MEDIUM in t.top_tiers else 0.0,
+        "affinity": ctx.affinity_norm(t),
+    }
+    return _blend(c, {"medium_term_tier": 0.7, "affinity": 0.3}), c
+
+
+def _all_time_favorites(t: Track, ctx: Context) -> tuple[float, dict]:
+    c = {
+        "long_term_tier": 1.0 if TIER_LONG in t.top_tiers else (0.4 if TIER_MEDIUM in t.top_tiers else 0.0),
+        "affinity": ctx.affinity_norm(t),
+    }
+    return _blend(c, {"long_term_tier": 0.6, "affinity": 0.4}), c
+
+
+def _throwback(t: Track, ctx: Context) -> tuple[float, dict]:
+    if t.release_year is None:
+        return 0.0, {"era": 0.0, "affinity": ctx.affinity_norm(t)}
+    age = ctx.now_year - t.release_year
+    era = _clamp01((age - 8) / 20.0)  # ramps 8->28 years old
+    c = {"era": era, "affinity": ctx.affinity_norm(t)}
+    return _blend(c, {"era": 0.7, "affinity": 0.3}), c
+
+
+def _fresh(t: Track, ctx: Context) -> tuple[float, dict]:
+    if t.release_year is None:
+        return 0.0, {"era": 0.0, "affinity": ctx.affinity_norm(t)}
+    age = ctx.now_year - t.release_year
+    era = _clamp01((3 - age) / 3.0)  # age 0 -> 1.0, age 3+ -> 0
+    c = {"era": era, "affinity": ctx.affinity_norm(t)}
+    return _blend(c, {"era": 0.8, "affinity": 0.2}), c
+
+
+def _long_form(t: Track, ctx: Context) -> tuple[float, dict]:
+    d = _clamp01((t.duration_ms - 240_000) / 180_000)  # 4min->0, 7min->1
+    c = {"duration": d, "affinity": ctx.affinity_norm(t)}
+    return _blend(c, {"duration": 0.8, "affinity": 0.2}), c
+
+
+def _quick_hits(t: Track, ctx: Context) -> tuple[float, dict]:
+    d = _clamp01((150_000 - t.duration_ms) / 90_000)  # 2.5min->0, 1min->1
+    c = {"shortness": d, "affinity": ctx.affinity_norm(t)}
+    return _blend(c, {"shortness": 0.8, "affinity": 0.2}), c
+
+
+def _clean(t: Track, ctx: Context) -> tuple[float, dict]:
+    if t.explicit:
+        return 0.0, {"clean": 0.0, "affinity": ctx.affinity_norm(t)}
+    c = {"clean": 1.0, "affinity": ctx.affinity_norm(t)}
+    return _blend(c, {"clean": 0.7, "affinity": 0.3}), c
+
+
+def _explicit(t: Track, ctx: Context) -> tuple[float, dict]:
+    if not t.explicit:
+        return 0.0, {"explicit": 0.0, "affinity": ctx.affinity_norm(t)}
+    c = {"explicit": 1.0, "affinity": ctx.affinity_norm(t)}
+    return _blend(c, {"explicit": 0.7, "affinity": 0.3}), c
+
+
+# --- lifetime (export-required) scorers ------------------------------------
+def _morning(t: Track, ctx: Context) -> tuple[float, dict]:
+    s = t.part_of_day_shares()
+    conf = _clamp01(t.lifetime_plays / 5.0)
+    c = {"morning_share": s["morning"], "confidence": conf}
+    return _blend(c, {"morning_share": 0.8, "confidence": 0.2}), c
+
+
+def _late_night(t: Track, ctx: Context) -> tuple[float, dict]:
+    s = t.part_of_day_shares()
+    conf = _clamp01(t.lifetime_plays / 5.0)
+    c = {"night_share": s["night"], "confidence": conf}
+    return _blend(c, {"night_share": 0.8, "confidence": 0.2}), c
+
+
+def _weekend(t: Track, ctx: Context) -> tuple[float, dict]:
+    conf = _clamp01(t.lifetime_plays / 5.0)
+    c = {"weekend_share": t.weekend_share(), "confidence": conf}
+    return _blend(c, {"weekend_share": 0.8, "confidence": 0.2}), c
+
+
+def _on_repeat(t: Track, ctx: Context) -> tuple[float, dict]:
+    c = {"plays": ctx.plays_norm(t), "recency": ctx.recency(t, window_days=60)}
+    return _blend(c, {"plays": 0.7, "recency": 0.3}), c
+
+
+def _comfort(t: Track, ctx: Context) -> tuple[float, dict]:
+    c = {
+        "completion": t.completion_ratio,
+        "non_skip": 1.0 - t.skip_ratio,
+        "loyalty": ctx.loyalty(t),
+        "plays": ctx.plays_norm(t),
+    }
+    return _blend(c, {"completion": 0.35, "non_skip": 0.25, "loyalty": 0.2, "plays": 0.2}), c
+
+
+def _focus_flow(t: Track, ctx: Context) -> tuple[float, dict]:
+    c = {
+        "completion": t.completion_ratio,
+        "deliberate": t.deliberate_ratio,
+        "non_skip": 1.0 - t.skip_ratio,
+    }
+    return _blend(c, {"completion": 0.4, "deliberate": 0.3, "non_skip": 0.3}), c
+
+
+def _deep_cuts(t: Track, ctx: Context) -> tuple[float, dict]:
+    if t.lifetime_plays < 2:
+        return 0.0, {"under_played": 0.0, "quality": 0.0}
+    c = {
+        "under_played": 1.0 - ctx.plays_norm(t),
+        "quality": t.completion_ratio * (1.0 - t.skip_ratio),
+    }
+    return _blend(c, {"under_played": 0.5, "quality": 0.5}), c
 
 
 @dataclass(frozen=True)
@@ -22,221 +218,67 @@ class MoodSpec:
     key: str
     label: str
     description: str
-    genre_keywords: tuple[str, ...]
-    anti_keywords: tuple[str, ...] = ()
-    pop_pref: str = "any"        # high | mid | low | any
-    era: tuple[int, int] | None = None   # inclusive preferred release-year band
-    explicit_pref: str = "any"   # avoid | any | prefer
-    # Component weights (normalized at scoring time).
-    w_genre: float = 0.60
-    w_pop: float = 0.20
-    w_era: float = 0.10
-    w_explicit: float = 0.10
+    requires_lifetime: bool
+    scorer: Callable[[Track, Context], tuple[float, dict]]
 
 
-# The taxonomy. Keywords are matched as case-insensitive substrings against
-# each artist genre string (Spotify genres are granular, e.g. "deep house",
-# "indie folk", "lo-fi beats"). Edit freely — it is the single source of truth.
 MOODS: dict[str, MoodSpec] = {
-    "focus": MoodSpec(
-        key="focus",
-        label="Focus / Deep Work",
-        description="Low-distraction, mostly instrumental, steady-state listening.",
-        genre_keywords=(
-            "ambient", "lo-fi", "lofi", "instrumental", "classical", "piano",
-            "post-rock", "minimal", "downtempo", "study", "drone", "neoclassical",
-        ),
-        anti_keywords=("metal", "punk", "trap", "drill", "hardcore", "screamo"),
-        pop_pref="any",
-        explicit_pref="avoid",
-    ),
-    "chill": MoodSpec(
-        key="chill",
-        label="Chill / Relax",
-        description="Easygoing, warm, low-intensity background listening.",
-        genre_keywords=(
-            "chill", "lo-fi", "lofi", "downtempo", "indie folk", "acoustic",
-            "bedroom pop", "dream pop", "soul", "bossa nova", "jazz", "soft",
-            "trip hop", "chillhop",
-        ),
-        anti_keywords=("hardcore", "thrash", "speed metal", "gabber"),
-        pop_pref="any",
-    ),
-    "energetic": MoodSpec(
-        key="energetic",
-        label="Energetic / Workout",
-        description="High-drive, up-tempo material for movement and workouts.",
-        genre_keywords=(
-            "edm", "house", "techno", "dance", "electro", "drum and bass",
-            "dnb", "hip hop", "rap", "trap", "pop", "big room", "hardstyle",
-            "phonk", "bass",
-        ),
-        anti_keywords=("ambient", "slowcore", "drone", "sleep"),
-        pop_pref="high",
-        explicit_pref="any",
-    ),
-    "party": MoodSpec(
-        key="party",
-        label="Party",
-        description="Crowd-pleasing, high-popularity, danceable hits.",
-        genre_keywords=(
-            "pop", "dance", "house", "edm", "reggaeton", "latin", "afrobeats",
-            "hip hop", "rap", "funk", "disco", "electro",
-        ),
-        pop_pref="high",
-    ),
-    "melancholy": MoodSpec(
-        key="melancholy",
-        label="Melancholy / Sad",
-        description="Introspective, wistful, emotionally heavy tracks.",
-        genre_keywords=(
-            "sad", "emo", "slowcore", "shoegaze", "indie folk", "singer-songwriter",
-            "ambient", "post-rock", "dream pop", "blues", "acoustic", "piano",
-        ),
-        anti_keywords=("party", "dance pop", "happy hardcore"),
-        pop_pref="any",
-    ),
-    "uplifting": MoodSpec(
-        key="uplifting",
-        label="Uplifting / Happy",
-        description="Bright, major-key, feel-good listening.",
-        genre_keywords=(
-            "pop", "indie pop", "funk", "soul", "disco", "afrobeats", "tropical",
-            "synthpop", "dance pop", "motown", "gospel",
-        ),
-        anti_keywords=("doom", "black metal", "slowcore", "funeral"),
-        pop_pref="high",
-    ),
-    "aggressive": MoodSpec(
-        key="aggressive",
-        label="Aggressive / Hype",
-        description="Hard-hitting, intense, high-aggression material.",
-        genre_keywords=(
-            "metal", "hardcore", "punk", "drill", "trap metal", "rap metal",
-            "thrash", "metalcore", "phonk", "industrial", "rage",
-        ),
-        pop_pref="any",
-        explicit_pref="prefer",
-    ),
-    "romantic": MoodSpec(
-        key="romantic",
-        label="Romantic",
-        description="Warm, intimate, slow-burn love songs.",
-        genre_keywords=(
-            "r&b", "rnb", "soul", "neo soul", "slow jam", "quiet storm",
-            "bolero", "bachata", "love", "smooth", "jazz",
-        ),
-        pop_pref="any",
-        explicit_pref="avoid",
-    ),
-    "nostalgic": MoodSpec(
-        key="nostalgic",
-        label="Nostalgic / Throwback",
-        description="Older-era favourites that read as throwbacks.",
-        genre_keywords=(
-            "classic rock", "80s", "90s", "oldies", "new wave", "synthwave",
-            "grunge", "britpop", "motown", "disco", "soul",
-        ),
-        era=(1960, 2009),
-        pop_pref="any",
-    ),
-    "sleepy": MoodSpec(
-        key="sleepy",
-        label="Sleep / Calm",
-        description="Very low-intensity, soothing, wind-down listening.",
-        genre_keywords=(
-            "ambient", "sleep", "piano", "neoclassical", "drone", "meditation",
-            "new age", "soft", "lullaby", "downtempo",
-        ),
-        anti_keywords=("rap", "metal", "edm", "punk", "trap", "house"),
-        pop_pref="any",
-        explicit_pref="avoid",
-    ),
+    "current_rotation": MoodSpec("current_rotation", "Current Rotation",
+        "What you're into right now — short-term top tracks, recently played.", False, _current_rotation),
+    "steady_favorites": MoodSpec("steady_favorites", "Steady Favorites",
+        "Your stable mid-term favorites (≈6 months).", False, _steady_favorites),
+    "all_time_favorites": MoodSpec("all_time_favorites", "All-Time Favorites",
+        "Long-term, enduring top tracks.", False, _all_time_favorites),
+    "throwback": MoodSpec("throwback", "Throwback",
+        "Older-era tracks (≈8+ years) you still hold onto.", False, _throwback),
+    "fresh": MoodSpec("fresh", "Fresh Releases",
+        "Recently released music (last ~2 years) in your library.", False, _fresh),
+    "long_form": MoodSpec("long_form", "Long-Form / Immersive",
+        "Longer tracks (5+ min) — slower, immersive listening.", False, _long_form),
+    "quick_hits": MoodSpec("quick_hits", "Quick Hits",
+        "Short tracks (≤~2.5 min) — punchy and brief.", False, _quick_hits),
+    "clean": MoodSpec("clean", "Clean",
+        "Non-explicit tracks you like.", False, _clean),
+    "explicit": MoodSpec("explicit", "Explicit",
+        "Explicit tracks you like.", False, _explicit),
+    # lifetime
+    "morning": MoodSpec("morning", "Morning",
+        "Tracks you disproportionately play in the morning (05:00–11:59).", True, _morning),
+    "late_night": MoodSpec("late_night", "Late Night",
+        "Tracks you play late at night (22:00–04:59).", True, _late_night),
+    "weekend": MoodSpec("weekend", "Weekend",
+        "Tracks skewed toward Saturday/Sunday listening.", True, _weekend),
+    "on_repeat": MoodSpec("on_repeat", "On Repeat",
+        "Your most-played tracks of all time, weighted to recent.", True, _on_repeat),
+    "comfort": MoodSpec("comfort", "Comfort",
+        "Long-loved tracks you finish and rarely skip.", True, _comfort),
+    "focus_flow": MoodSpec("focus_flow", "Focus Flow",
+        "Deliberately chosen tracks you play through without skipping.", True, _focus_flow),
+    "deep_cuts": MoodSpec("deep_cuts", "Deep Cuts",
+        "Under-played gems you finish when they come on.", True, _deep_cuts),
 }
 
 
-def list_moods() -> list[dict]:
-    return [
-        {
+def list_moods(*, has_lifetime: bool | None = None) -> list[dict]:
+    out = []
+    for m in MOODS.values():
+        out.append({
             "key": m.key,
             "label": m.label,
             "description": m.description,
-            "genre_keywords": list(m.genre_keywords),
-            "popularity_preference": m.pop_pref,
-            "era": list(m.era) if m.era else None,
-            "explicit_preference": m.explicit_pref,
-        }
-        for m in MOODS.values()
-    ]
-
-
-# --- scoring components (all pure, deterministic) ---------------------------
-def _genre_score(track: Track, mood: MoodSpec) -> float:
-    if not track.genres:
-        # Unknown genres: neutral-low so other signals decide rather than zeroing.
-        return 0.15
-    genres = [g.lower() for g in track.genres]
-    hits = sum(1 for g in genres for kw in mood.genre_keywords if kw in g)
-    anti = sum(1 for g in genres for kw in mood.anti_keywords if kw in g)
-    base = min(1.0, hits / 2.0)               # 2+ keyword hits = full marks
-    base -= min(0.5, 0.25 * anti)             # each anti-genre subtracts, capped
-    return max(0.0, min(1.0, base))
-
-
-def _pop_score(track: Track, mood: MoodSpec) -> float:
-    p = max(0, min(100, track.popularity)) / 100.0
-    if mood.pop_pref == "high":
-        return p
-    if mood.pop_pref == "low":
-        return 1.0 - p
-    if mood.pop_pref == "mid":
-        return 1.0 - abs(p - 0.5) * 2.0
-    return 0.5
-
-
-def _era_score(track: Track, mood: MoodSpec) -> float:
-    if mood.era is None:
-        return 0.5
-    if track.release_year is None:
-        return 0.4  # slightly below neutral when era matters but is unknown
-    lo, hi = mood.era
-    if lo <= track.release_year <= hi:
-        return 1.0
-    dist = (lo - track.release_year) if track.release_year < lo else (track.release_year - hi)
-    return max(0.0, 1.0 - dist / 20.0)  # linear falloff over ~2 decades
-
-
-def _explicit_score(track: Track, mood: MoodSpec) -> float:
-    if mood.explicit_pref == "avoid":
-        return 0.0 if track.explicit else 1.0
-    if mood.explicit_pref == "prefer":
-        return 1.0 if track.explicit else 0.3
-    return 0.5
-
-
-def score_track(track: Track, mood: MoodSpec) -> tuple[float, dict[str, float]]:
-    """Return (overall_score in [0,1], component breakdown)."""
-    comps = {
-        "genre": _genre_score(track, mood),
-        "popularity": _pop_score(track, mood),
-        "era": _era_score(track, mood),
-        "explicit": _explicit_score(track, mood),
-    }
-    weights = {
-        "genre": mood.w_genre,
-        "popularity": mood.w_pop,
-        "era": mood.w_era,
-        "explicit": mood.w_explicit,
-    }
-    total_w = sum(weights.values()) or 1.0
-    overall = sum(comps[k] * weights[k] for k in comps) / total_w
-    return overall, comps
+            "requires_extended_history": m.requires_lifetime,
+            "available_now": (not m.requires_lifetime) or bool(has_lifetime),
+        })
+    return out
 
 
 def get_mood(key: str) -> MoodSpec:
     norm = key.strip().lower()
     if norm not in MOODS:
-        raise KeyError(
-            f"Unknown mood {key!r}. Available: {', '.join(MOODS)}."
-        )
+        raise KeyError(f"Unknown mood {key!r}. Available: {', '.join(MOODS)}.")
     return MOODS[norm]
+
+
+def score_track(track: Track, mood: MoodSpec | str, ctx: Context) -> tuple[float, dict]:
+    spec = mood if isinstance(mood, MoodSpec) else get_mood(mood)
+    return spec.scorer(track, ctx)

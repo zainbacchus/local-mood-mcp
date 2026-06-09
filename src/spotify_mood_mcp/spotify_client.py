@@ -2,19 +2,22 @@
 
 Scope of endpoints (all confirmed available to new apps as of 2026):
   GET  /me
-  GET  /me/top/tracks               GET /me/top/artists
+  GET  /me/top/tracks
   GET  /me/player/recently-played
   GET  /me/tracks                   (saved library)
-  GET  /artists?ids=...             (batch genre enrichment, <=50)
+  GET  /tracks/{id}                 (single-track era/explicit/duration)
   GET  /me/playlists
   POST /users/{id}/playlists        POST /playlists/{id}/tracks
   GET  /me/player/devices
   GET  /me/player                   PUT /me/player/play  PUT /me/player/pause
   POST /me/player/next
 
-DELIBERATELY NOT USED (deprecated 2024-11-27, return 403 for new apps):
+VERIFIED 403 FOR NEW APPS (do not use):
   /audio-features  /audio-analysis  /recommendations  /artists/{id}/related-artists
   /browse/featured-playlists  /browse/categories/*/playlists
+  /artists?ids=...  /tracks?ids=...   (BATCH gets are 403; single gets work)
+  Also: artist objects return null genres/popularity; track objects omit
+  popularity. So genre/popularity-based logic is impossible — we use behavior.
 
 The client handles 401 (refresh once + retry), 429 (honour Retry-After), and
 transient 5xx (bounded backoff). It never logs tokens.
@@ -144,18 +147,6 @@ class SpotifyClient:
 
     async def saved_tracks(self, cap: int = 2000) -> list[dict]:
         return await self.get_all("/me/tracks", cap=cap)
-
-    async def artists(self, artist_ids: list[str]) -> dict[str, dict]:
-        """Batch-fetch artists (<=50 per call) for genre enrichment."""
-        result: dict[str, dict] = {}
-        unique = list(dict.fromkeys(a for a in artist_ids if a))
-        for i in range(0, len(unique), 50):
-            chunk = unique[i : i + 50]
-            data = await self.get("/artists", ids=",".join(chunk))
-            for art in (data or {}).get("artists", []):
-                if art and art.get("id"):
-                    result[art["id"]] = art
-        return result
 
     async def my_playlists(self, cap: int = 200) -> list[dict]:
         return await self.get_all("/me/playlists", cap=cap)

@@ -1,55 +1,67 @@
 # spotify-mood-mcp
 
-A **deterministic, mood-based Spotify playlist generator** and playback
+A **deterministic, behavior-based Spotify playlist generator** and playback
 controller, exposed as an [MCP](https://modelcontextprotocol.io) server so you
-can drive it from Claude. Built clean and secure for the **post-2024 Spotify
-Web API**.
+can drive it from Claude. Built clean and secure for the **2026 Spotify Web
+API** — Spotify-only, no external services.
 
-> **Why this is built the way it is.** On **2024-11-27** Spotify deprecated the
-> `audio-features`, `audio-analysis`, `recommendations`, and `related-artists`
-> endpoints for all newly-created apps — they now return `403` with no official
-> replacement. The classic "mood = valence/energy/danceability" trick is
-> therefore **impossible** for any new app. This project does not call those
-> endpoints. Instead, mood is inferred **deterministically** from signals that
-> still exist: artist **genres**, track **popularity**, release **era**, the
-> **explicit** flag, and *your own* play frequency.
+> ### Why "mood" works the way it does here (verified live, June 2026)
+> Spotify has progressively locked down its Web API for newly-created apps. We
+> confirmed the following **against a live new app**, not just the docs:
+>
+> | Signal | Status for new apps |
+> |--------|---------------------|
+> | `audio-features` / `audio-analysis` / `recommendations` / `related-artists` | `403` — deprecated 2024-11-27, no replacement |
+> | Artist **genres**, artist **popularity**, **followers** | returned as `null` |
+> | **Track popularity** | field no longer returned |
+> | `GET /artists?ids=` and `GET /tracks?ids=` (**batch** reads) | `403` |
+> | `GET /artists/{id}`, `GET /tracks/{id}` (**single** reads) | OK |
+> | Release **era**, **explicit**, **duration**, IDs/names/URIs | OK |
+> | Your **top tracks** (3 ranges), **recently-played**, **saved library** | OK |
+>
+> The upshot: **there is no genre or audio signal available to a new app**, so
+> the usual "mood = valence/energy/genre" approach is impossible. Instead, mood
+> is defined by **how you actually listen** — affinity, recency, era, length,
+> and (with the export) time-of-day and completion behavior. Same library +
+> same parameters → the identical ordered list of exact track IDs, every time.
 
-## What it does
+## How "mood" is defined
 
-- **Analyzes your listening history** from every source the API still exposes:
-  top tracks (short / medium / long term), recently played, and your full saved
-  library — deduped and enriched with artist genres.
-- **Deterministic mood mapping.** A fixed, transparent genre→mood table
-  (`moods.py`) scores every track. Same library + same parameters → the
-  identical ordered list of tracks, every time.
-- **Explicit track-ID selection.** Generation returns **exact Spotify track
-  IDs** with a per-track scoring rationale. Playlist creation only ever consumes
-  explicit IDs — it never free-text "finds songs."
-- **Playback control** from Claude: list devices, play exact tracks or a
-  playlist, pause, skip, and see what's playing (requires Spotify Premium).
-- **True lifetime history (optional):** import Spotify's official *Extended
-  Streaming History* export for play counts the API can't give you.
+Two tiers of moods, all deterministic:
+
+**Instant moods** (work the moment you `sync_listening_history`, from API affinity):
+`current_rotation`, `steady_favorites`, `all_time_favorites`, `throwback`,
+`fresh`, `long_form`, `quick_hits`, `clean`, `explicit`.
+
+**Lifetime moods** (need your *Extended Streaming History* export — see below):
+`morning`, `late_night`, `weekend`, `on_repeat`, `comfort`, `focus_flow`,
+`deep_cuts`.
+
+Each mood is a pure scoring function in [`moods.py`](src/spotify_mood_mcp/moods.py)
+over signals like affinity tier, release year, duration, recency, play count,
+completion/skip ratio, deliberate starts, and an hour-of-day histogram. Every
+selection comes with a per-component `why` breakdown.
 
 ## Security posture
 
-- **Authorization Code + PKCE** only (Spotify ended the implicit grant flow on
-  2025-11-27). CSRF-protected with a random `state` verified on callback.
-- **Loopback redirect** `http://127.0.0.1:8888/callback`. `localhost` is
-  rejected at config load (Spotify no longer accepts it); the loopback callback
-  server binds to `127.0.0.1` only.
+- **Authorization Code + PKCE** only (Spotify ended implicit grant 2025-11-27).
+  CSRF-protected with a random `state` verified on callback.
+- **Loopback redirect** `http://127.0.0.1:8888/callback`. `localhost` is rejected
+  at config load (Spotify no longer accepts it); the callback server binds to
+  `127.0.0.1` only and handles exactly one request.
 - **Least-privilege scopes**, each requested explicitly and justified in
-  `config.py`.
+  [`config.py`](src/spotify_mood_mcp/config.py).
 - **Tokens stored securely:** OS keyring (macOS Keychain / libsecret / Windows
   Credential Locker) by default; encrypted-file fallback (Fernet, key in keyring,
-  `0600`) only if no keyring is available — with a loud warning. Tokens are never
-  logged.
-- The client secret is **optional** (PKCE needs only the client id). Secrets and
-  local state are `.gitignore`d.
+  `0600`) only if no keyring exists — with a loud warning. Tokens are never logged.
+- Client secret is **optional** (PKCE needs only the client id). Secrets and local
+  state (`~/.spotify-mood-mcp`) are kept out of the repo.
 
 ## Setup
 
 1. **Create a Spotify app** at <https://developer.spotify.com/dashboard>.
-   Add this exact Redirect URI: `http://127.0.0.1:8888/callback`.
+   Add this exact Redirect URI: `http://127.0.0.1:8888/callback`
+   (not `localhost`). Check **Web API**.
 
 2. **Install** (Python ≥ 3.11):
    ```bash
@@ -57,8 +69,7 @@ Web API**.
    pip install -e .
    ```
 
-3. **Configure** — copy `.env.example` to `.env` and set `SPOTIFY_CLIENT_ID`
-   (optionally `SPOTIFY_CLIENT_SECRET`).
+3. **Configure** — `cp .env.example .env`, then set `SPOTIFY_CLIENT_ID`.
 
 4. **Authorize once** (opens your browser):
    ```bash
@@ -78,16 +89,29 @@ Web API**.
    }
    ```
 
+## Getting your Extended Streaming History (unlocks lifetime moods)
+
+The Web API can't give true lifetime data, so lifetime moods read Spotify's
+official export:
+
+1. Go to <https://www.spotify.com/account/privacy/> →
+   **"Extended streaming history"** → **Request data**.
+2. Spotify emails a download link in **~5 days** (occasionally up to 30).
+3. Unzip it, then point the tool at the folder of
+   `Streaming_History_Audio_*.json` files via `import_extended_history`.
+
+Until it arrives, the instant moods work fully.
+
 ## Tools exposed
 
 | Tool | What it does |
 |------|--------------|
 | `spotify_auth_status` | Auth state + token expiry (no login side-effect) |
-| `sync_listening_history` | Pull + analyze + cache your history |
-| `import_extended_history` | Fold in lifetime play counts from the official export |
-| `library_stats` | Track count, source breakdown, top genres |
-| `list_moods` | The mood taxonomy and its deterministic rules |
-| `generate_playlist` | **Deterministic** selection → preview of exact track IDs |
+| `sync_listening_history` | Pull + analyze + cache your history (instant signals) |
+| `import_extended_history` | Fold in lifetime behavior from the official export |
+| `library_stats` | Track count, affinity tiers, era distribution, lifetime status |
+| `list_moods` | The moods, each marked instant vs. needs-export |
+| `generate_playlist` | **Deterministic** selection → preview of exact track IDs + rationale |
 | `explain_track` | Why a track scores as it does for a mood |
 | `create_playlist` | Create a playlist from **exact** track IDs |
 | `create_mood_playlist` | Select for a mood and create, in one step (still ID-based) |
@@ -97,40 +121,33 @@ Web API**.
 ### Typical flow in Claude
 
 1. *"Sync my Spotify history"* → `sync_listening_history`
-2. *"Generate a 25-track focus playlist, nothing explicit"* → `generate_playlist`
-   (returns exact IDs + rationale; nothing created yet)
-3. *"Create that as a private playlist called Deep Work"* → `create_playlist`
+2. *"Make me a 25-track throwback playlist, nothing explicit, before 2010"* →
+   `generate_playlist` (returns exact IDs + rationale; nothing created yet)
+3. *"Create that as a private playlist called Throwbacks"* → `create_playlist`
    with the returned IDs
 4. *"Play it on my laptop"* → `list_devices` then `play`
 
-## Moods
+## Tuning knobs
 
-`focus`, `chill`, `energetic`, `party`, `melancholy`, `uplifting`,
-`aggressive`, `romantic`, `nostalgic`, `sleepy`. Each is a transparent rule set
-in `moods.py` — edit the keywords/preferences to tune to your taste; behaviour
-stays deterministic.
+`generate_playlist` / `create_mood_playlist` accept: `count`, `min_year`,
+`max_year`, `exclude_explicit`, `min_duration_ms`, `max_duration_ms`,
+`require_affinity`, and `familiarity_weight` (0 = pure mood fit, 1 = pure
+listen-frequency). Ordering is fully specified: final score, then affinity
+plays, lifetime plays, and finally track id as a stable tiebreak.
 
-## Determinism & tuning knobs
+## Limitations (by API, stated honestly)
 
-`generate_playlist` accepts `count`, `min/max_popularity`, `min/max_year`,
-`exclude_explicit`, `require_genre_match`, and `familiarity_weight` (0 = pure
-mood fit, 1 = pure play-frequency). Ordering is fully specified: score, then
-play count, popularity, and finally track id as a stable tiebreak.
-
-## Limitations (by design / by API)
-
-- **No true "entire" history via the API** — Spotify caps recently-played at
-  ~50 and offers no full stream endpoint. `import_extended_history` is the only
-  path to lifetime data.
-- **No acoustic mood analysis** — `audio-features` is gone for new apps. Mood is
-  a genre/metadata heuristic, deliberately transparent rather than a black box.
+- **No genre or acoustic mood** — Spotify exposes neither to new apps. Mood is
+  behavioral/temporal/era-based, deliberately transparent rather than a black box.
+- **No "entire" history via the API** — recently-played caps at ~50 and there's
+  no full-stream endpoint. `import_extended_history` is the only lifetime path.
 - **Playback requires Premium** and an active Connect device.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest -q            # determinism + selection tests (no network)
+pytest -q            # 15 determinism + selection tests, no network
 ```
 
 ## License

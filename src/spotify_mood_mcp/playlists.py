@@ -1,38 +1,41 @@
 """Deterministic playlist selection + creation by exact track IDs.
 
-Selection is a pure function of (library, mood, filters): score every track,
-optionally blend in the user's own familiarity (play frequency), then sort by a
-fully specified, tie-broken key. No randomness — re-running with the same
-library and parameters yields the identical ordered list of track IDs.
+Selection is a pure function of (library, mood, filters): build a normalization
+context, score every track with the mood's behavioral scorer, optionally blend
+in raw affinity (how much you listen to it), then sort by a fully specified,
+tie-broken key. Re-running with the same library + params yields the identical
+ordered list of Spotify track IDs.
 
-Creation never interprets natural language: `create_playlist_from_ids` takes the
-exact track IDs you pass (typically straight from `select_for_mood`) and writes
-them, in order, to a new Spotify playlist.
+Creation never interprets natural language: create_playlist_from_ids takes the
+exact IDs you pass (typically from select_for_mood) and writes them in order.
 """
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 
 from .models import Track
-from .moods import MoodSpec, get_mood, score_track
+from .moods import Context, MoodSpec, build_context, get_mood, score_track
 from .spotify_client import SpotifyClient
 from .store import Library
 
 _ID_RE = re.compile(r"^[A-Za-z0-9]{22}$")  # Spotify base-62 IDs are 22 chars
 
 
+class LifetimeRequiredError(RuntimeError):
+    """A lifetime mood was requested but no Extended Streaming History is loaded."""
+
+
 @dataclass(frozen=True)
 class Filters:
-    min_popularity: int = 0
-    max_popularity: int = 100
     min_year: int | None = None
     max_year: int | None = None
     exclude_explicit: bool = False
-    require_genre_match: bool = False  # drop tracks with zero genre signal
-    familiarity_weight: float = 0.25   # 0 = pure mood fit, 1 = pure play-frequency
+    min_duration_ms: int | None = None
+    max_duration_ms: int | None = None
+    require_affinity: bool = False     # drop tracks you've never engaged with
+    familiarity_weight: float = 0.25   # 0 = pure mood fit, 1 = pure listen-frequency
 
 
 @dataclass
@@ -43,22 +46,18 @@ class Selection:
     components: dict[str, float]
 
 
-def _familiarity_scores(tracks: list[Track]) -> dict[str, float]:
-    max_pc = max((t.play_count for t in tracks), default=0)
-    denom = math.log1p(max_pc) if max_pc > 0 else 1.0
-    return {t.id: (math.log1p(t.play_count) / denom if denom else 0.0) for t in tracks}
-
-
-def _passes_filters(t: Track, mood: MoodSpec, f: Filters) -> bool:
-    if not (f.min_popularity <= t.popularity <= f.max_popularity):
-        return False
-    if f.exclude_explicit and t.explicit:
-        return False
+def _passes(t: Track, f: Filters) -> bool:
     if f.min_year is not None and (t.release_year is None or t.release_year < f.min_year):
         return False
     if f.max_year is not None and (t.release_year is None or t.release_year > f.max_year):
         return False
-    if f.require_genre_match and not t.genres:
+    if f.exclude_explicit and t.explicit:
+        return False
+    if f.min_duration_ms is not None and t.duration_ms < f.min_duration_ms:
+        return False
+    if f.max_duration_ms is not None and t.duration_ms > f.max_duration_ms:
+        return False
+    if f.require_affinity and t.affinity_plays <= 0:
         return False
     return True
 
@@ -66,26 +65,32 @@ def _passes_filters(t: Track, mood: MoodSpec, f: Filters) -> bool:
 def select_for_mood(
     library: Library, mood_key: str, *, count: int = 25, filters: Filters | None = None
 ) -> list[Selection]:
-    mood = get_mood(mood_key)
+    mood: MoodSpec = get_mood(mood_key)
     f = filters or Filters()
-    fam = _familiarity_scores(library.tracks)
-    fam_w = max(0.0, min(1.0, f.familiarity_weight))
+    ctx: Context = build_context(library.tracks)
 
+    if mood.requires_lifetime and not ctx.has_lifetime:
+        raise LifetimeRequiredError(
+            f"Mood {mood.key!r} needs your Extended Streaming History. "
+            "Request it at Spotify → Account → Privacy → 'Extended streaming "
+            "history', then run import_extended_history. Until then, use an "
+            "instant mood (e.g. current_rotation, all_time_favorites, throwback)."
+        )
+
+    fam_w = max(0.0, min(1.0, f.familiarity_weight))
     scored: list[Selection] = []
     for t in library.tracks:
-        if not _passes_filters(t, mood, f):
+        if not _passes(t, f):
             continue
-        ms, comps = score_track(t, mood)
-        final = (1.0 - fam_w) * ms + fam_w * fam.get(t.id, 0.0)
+        ms, comps = score_track(t, mood, ctx)
+        final = (1.0 - fam_w) * ms + fam_w * ctx.affinity_norm(t)
         scored.append(Selection(track=t, mood_score=ms, final_score=final, components=comps))
 
-    # Deterministic ordering. Round to avoid platform float jitter, then break
-    # ties by play_count, popularity, and finally the stable track id.
     scored.sort(
         key=lambda s: (
             -round(s.final_score, 6),
-            -s.track.play_count,
-            -s.track.popularity,
+            -s.track.affinity_plays,
+            -s.track.lifetime_plays,
             s.track.id,
         )
     )
@@ -99,25 +104,18 @@ def selection_to_preview(selections: list[Selection]) -> list[dict]:
             "uri": s.track.uri,
             "name": s.track.name,
             "artists": s.track.artist_names,
-            "genres": s.track.genres[:6],
-            "popularity": s.track.popularity,
             "release_year": s.track.release_year,
-            "play_count": s.track.play_count,
+            "duration_ms": s.track.duration_ms,
+            "explicit": s.track.explicit,
+            "top_tiers": s.track.top_tiers,
+            "affinity_plays": s.track.affinity_plays,
+            "lifetime_plays": s.track.lifetime_plays,
             "mood_score": round(s.mood_score, 4),
             "final_score": round(s.final_score, 4),
-            "why": _why(s),
+            "why": {k: round(v, 4) for k, v in s.components.items()},
         }
         for s in selections
     ]
-
-
-def _why(s: Selection) -> str:
-    c = s.components
-    parts = [f"{k}={v:.2f}" for k, v in c.items()]
-    return (
-        f"genre/pop/era/explicit -> {', '.join(parts)}; "
-        f"play_count={s.track.play_count}; final={s.final_score:.3f}"
-    )
 
 
 def validate_track_ids(track_ids: list[str]) -> list[str]:
@@ -131,7 +129,6 @@ def validate_track_ids(track_ids: list[str]) -> list[str]:
         if not _ID_RE.match(tid):
             raise ValueError(f"Invalid Spotify track id: {raw!r}")
         cleaned.append(tid)
-    # De-dupe preserving order.
     return list(dict.fromkeys(cleaned))
 
 

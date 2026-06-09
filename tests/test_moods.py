@@ -1,113 +1,187 @@
-"""Determinism and correctness of the mood scoring + selection layer.
+"""Determinism and correctness of the behavioral mood + selection layer.
 
-These tests use synthetic tracks only — no network, no auth.
+Synthetic tracks only — no network, no auth.
 """
 
-from spotify_mood_mcp.models import Track
-from spotify_mood_mcp.moods import get_mood, score_track, list_moods
-from spotify_mood_mcp.playlists import Filters, select_for_mood, validate_track_ids
+import pytest
+
+from spotify_mood_mcp.models import TIER_LONG, TIER_SHORT, TIER_MEDIUM, Track
+from spotify_mood_mcp.moods import build_context, get_mood, list_moods, score_track
+from spotify_mood_mcp.playlists import (
+    Filters,
+    LifetimeRequiredError,
+    select_for_mood,
+    validate_track_ids,
+)
 from spotify_mood_mcp.store import Library
 
 
-def _t(id_, genres, pop=50, year=2020, explicit=False, plays=1):
-    return Track(
-        id=id_,
-        name=f"track-{id_}",
-        artist_ids=["a"],
-        artist_names=["Artist"],
-        popularity=pop,
-        release_year=year,
-        explicit=explicit,
-        genres=genres,
-        play_count=plays,
-    )
+def _t(id_, **kw):
+    return Track(id=id_, name=f"track-{id_}", artist_names=["A"], **kw)
 
 
-def _library():
-    return Library(
-        tracks=[
-            _t("a" * 22, ["ambient", "drone"], pop=20, plays=5),
-            _t("b" * 22, ["edm", "big room house"], pop=90, plays=2),
-            _t("c" * 22, ["indie folk", "acoustic"], pop=40, plays=10),
-            _t("d" * 22, ["metalcore", "hardcore"], pop=55, explicit=True, plays=1),
-            _t("e" * 22, [], pop=60, plays=3),  # no genre signal
-        ]
-    )
+def _morning_hist():
+    h = [0] * 24
+    for hr in (6, 7, 8, 9):
+        h[hr] = 5
+    return h
 
 
-def test_focus_prefers_ambient_over_edm():
-    lib = _library()
-    focus = get_mood("focus")
-    ambient = next(t for t in lib.tracks if t.id.startswith("a"))
-    edm = next(t for t in lib.tracks if t.id.startswith("b"))
-    assert score_track(ambient, focus)[0] > score_track(edm, focus)[0]
+def _night_hist():
+    h = [0] * 24
+    for hr in (23, 0, 1, 2):
+        h[hr] = 5
+    return h
 
 
-def test_energetic_prefers_edm_over_ambient():
-    lib = _library()
-    energetic = get_mood("energetic")
-    ambient = next(t for t in lib.tracks if t.id.startswith("a"))
-    edm = next(t for t in lib.tracks if t.id.startswith("b"))
-    assert score_track(edm, energetic)[0] > score_track(ambient, energetic)[0]
+def _instant_library():
+    return Library(tracks=[
+        _t("a" * 22, top_tiers=[TIER_SHORT], release_year=2024, duration_ms=180_000, api_recent_plays=3),
+        _t("b" * 22, top_tiers=[TIER_LONG], release_year=1995, duration_ms=420_000),
+        _t("c" * 22, top_tiers=[TIER_MEDIUM], release_year=2010, duration_ms=70_000, explicit=True),
+        _t("d" * 22, top_tiers=[], release_year=2026, duration_ms=200_000, in_saved=True),
+    ])
 
 
-def test_scores_bounded_0_1():
-    lib = _library()
-    for mood_key in (m["key"] for m in list_moods()):
-        spec = get_mood(mood_key)
-        for t in lib.tracks:
-            s, _ = score_track(t, spec)
-            assert 0.0 <= s <= 1.0
+def _lifetime_library():
+    return Library(tracks=[
+        _t("a" * 22, lifetime_plays=50, completions=48, skips=1, deliberate_starts=40,
+           hour_hist=_morning_hist(), weekday_plays=30, weekend_plays=2, first_play_ms=1),
+        _t("b" * 22, lifetime_plays=40, completions=10, skips=25,
+           hour_hist=_night_hist(), weekday_plays=5, weekend_plays=20, first_play_ms=1),
+        _t("c" * 22, lifetime_plays=3, completions=3, skips=0,
+           hour_hist=[1] * 24),
+    ])
 
 
-def test_selection_is_deterministic():
-    lib = _library()
-    f = Filters(familiarity_weight=0.3)
-    first = [s.track.id for s in select_for_mood(lib, "chill", count=5, filters=f)]
-    second = [s.track.id for s in select_for_mood(lib, "chill", count=5, filters=f)]
-    assert first == second
-    # And stable regardless of input ordering.
+# --- instant moods ----------------------------------------------------------
+def test_current_rotation_prefers_short_term():
+    lib = _instant_library()
+    ctx = build_context(lib.tracks)
+    short = next(t for t in lib.tracks if t.id.startswith("a"))
+    long_ = next(t for t in lib.tracks if t.id.startswith("b"))
+    assert score_track(short, "current_rotation", ctx)[0] > score_track(long_, "current_rotation", ctx)[0]
+
+
+def test_all_time_prefers_long_term():
+    lib = _instant_library()
+    ctx = build_context(lib.tracks)
+    short = next(t for t in lib.tracks if t.id.startswith("a"))
+    long_ = next(t for t in lib.tracks if t.id.startswith("b"))
+    assert score_track(long_, "all_time_favorites", ctx)[0] > score_track(short, "all_time_favorites", ctx)[0]
+
+
+def test_throwback_vs_fresh_era():
+    lib = _instant_library()
+    ctx = build_context(lib.tracks)
+    old = next(t for t in lib.tracks if t.id.startswith("b"))   # 1995
+    new = next(t for t in lib.tracks if t.id.startswith("d"))   # 2026
+    assert score_track(old, "throwback", ctx)[0] > score_track(new, "throwback", ctx)[0]
+    assert score_track(new, "fresh", ctx)[0] > score_track(old, "fresh", ctx)[0]
+
+
+def test_long_form_vs_quick_hits_duration():
+    lib = _instant_library()
+    ctx = build_context(lib.tracks)
+    long_ = next(t for t in lib.tracks if t.id.startswith("b"))  # 7 min
+    short = next(t for t in lib.tracks if t.id.startswith("c"))  # 70 s
+    assert score_track(long_, "long_form", ctx)[0] > score_track(short, "long_form", ctx)[0]
+    assert score_track(short, "quick_hits", ctx)[0] > score_track(long_, "quick_hits", ctx)[0]
+
+
+def test_clean_vs_explicit():
+    lib = _instant_library()
+    ctx = build_context(lib.tracks)
+    explicit = next(t for t in lib.tracks if t.id.startswith("c"))
+    clean = next(t for t in lib.tracks if t.id.startswith("a"))
+    assert score_track(explicit, "explicit", ctx)[0] > 0
+    assert score_track(explicit, "clean", ctx)[0] == 0.0
+    assert score_track(clean, "clean", ctx)[0] > 0
+
+
+# --- lifetime moods ---------------------------------------------------------
+def test_morning_and_night_separation():
+    lib = _lifetime_library()
+    ctx = build_context(lib.tracks)
+    morning = next(t for t in lib.tracks if t.id.startswith("a"))
+    night = next(t for t in lib.tracks if t.id.startswith("b"))
+    assert score_track(morning, "morning", ctx)[0] > score_track(night, "morning", ctx)[0]
+    assert score_track(night, "late_night", ctx)[0] > score_track(morning, "late_night", ctx)[0]
+
+
+def test_on_repeat_prefers_high_plays():
+    lib = _lifetime_library()
+    ctx = build_context(lib.tracks)
+    heavy = next(t for t in lib.tracks if t.id.startswith("a"))  # 50 plays
+    light = next(t for t in lib.tracks if t.id.startswith("c"))  # 3 plays
+    assert score_track(heavy, "on_repeat", ctx)[0] > score_track(light, "on_repeat", ctx)[0]
+
+
+def test_comfort_rewards_completion_over_skips():
+    lib = _lifetime_library()
+    ctx = build_context(lib.tracks)
+    loved = next(t for t in lib.tracks if t.id.startswith("a"))   # completes, rarely skips
+    skipped = next(t for t in lib.tracks if t.id.startswith("b"))  # high skip
+    assert score_track(loved, "comfort", ctx)[0] > score_track(skipped, "comfort", ctx)[0]
+
+
+def test_lifetime_mood_without_export_raises():
+    lib = _instant_library()  # no lifetime data
+    with pytest.raises(LifetimeRequiredError):
+        select_for_mood(lib, "morning", count=5)
+
+
+# --- determinism & filters --------------------------------------------------
+def test_selection_is_deterministic_and_order_invariant():
     import random
 
+    lib = _instant_library()
+    f = Filters(familiarity_weight=0.3)
+    first = [s.track.id for s in select_for_mood(lib, "all_time_favorites", count=4, filters=f)]
+    second = [s.track.id for s in select_for_mood(lib, "all_time_favorites", count=4, filters=f)]
+    assert first == second
     shuffled = Library(tracks=list(lib.tracks))
-    random.Random(123).shuffle(shuffled.tracks)
-    third = [s.track.id for s in select_for_mood(shuffled, "chill", count=5, filters=f)]
+    random.Random(7).shuffle(shuffled.tracks)
+    third = [s.track.id for s in select_for_mood(shuffled, "all_time_favorites", count=4, filters=f)]
     assert first == third
 
 
-def test_explicit_filter_and_avoid_pref():
-    lib = _library()
-    # focus avoids explicit -> the explicit metalcore track scores 0 on explicit
-    focus = get_mood("focus")
-    metal = next(t for t in lib.tracks if t.id.startswith("d"))
-    _, comps = score_track(metal, focus)
-    assert comps["explicit"] == 0.0
-    # exclude_explicit filter drops it entirely
-    f = Filters(exclude_explicit=True)
-    ids = [s.track.id for s in select_for_mood(lib, "focus", count=10, filters=f)]
-    assert metal.id not in ids
+def test_filters_year_and_explicit_and_duration():
+    lib = _instant_library()
+    ids = [s.track.id for s in select_for_mood(
+        lib, "all_time_favorites", count=10,
+        filters=Filters(exclude_explicit=True, min_year=2000, max_duration_ms=300_000),
+    )]
+    # c is explicit -> dropped; b is 1995 -> dropped by min_year; b is 7min -> also dropped
+    assert ("c" * 22) not in ids
+    assert ("b" * 22) not in ids
 
 
-def test_require_genre_match_drops_unknown():
-    lib = _library()
-    f = Filters(require_genre_match=True)
-    ids = [s.track.id for s in select_for_mood(lib, "chill", count=10, filters=f)]
-    assert ("e" * 22) not in ids  # the no-genre track
+def test_part_of_day_shares_sum_to_one():
+    t = _t("a" * 22, hour_hist=_morning_hist(), lifetime_plays=20)
+    shares = t.part_of_day_shares()
+    assert abs(sum(shares.values()) - 1.0) < 1e-9
+    assert shares["morning"] == 1.0
 
 
-def test_validate_track_ids_accepts_uri_url_and_id():
-    raw = [
+def test_list_moods_marks_lifetime_availability():
+    moods = list_moods(has_lifetime=False)
+    by_key = {m["key"]: m for m in moods}
+    assert by_key["current_rotation"]["available_now"] is True
+    assert by_key["morning"]["available_now"] is False
+    assert by_key["morning"]["requires_extended_history"] is True
+
+
+def test_validate_track_ids_accepts_uri_url_and_dedupes():
+    out = validate_track_ids([
         "1" * 22,
         "spotify:track:" + "2" * 22,
         "https://open.spotify.com/track/" + "3" * 22 + "?si=abc",
-        "1" * 22,  # duplicate -> deduped
-    ]
-    out = validate_track_ids(raw)
+        "1" * 22,
+    ])
     assert out == ["1" * 22, "2" * 22, "3" * 22]
 
 
 def test_validate_rejects_garbage():
-    import pytest
-
     with pytest.raises(ValueError):
         validate_track_ids(["not-a-valid-id"])

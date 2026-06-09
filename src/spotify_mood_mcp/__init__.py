@@ -1,10 +1,12 @@
-"""Deterministic, mood-based Spotify playlist generator + playback controller as an MCP server.
+"""Deterministic, behavior-based Spotify playlist generator + playback controller as an MCP server.
 
-Designed for the post-2024 Spotify Web API: the audio-features, audio-analysis,
-recommendations, and related-artists endpoints were deprecated for new apps on
-2024-11-27 and return 403. Nothing in this package calls them. Mood is derived
-deterministically from artist genres, popularity, era, and the user's own play
-history. See moods.py for the full taxonomy.
+Designed for the 2026 Spotify Web API. Verified live against a new app: genres,
+artist/track popularity, audio-features, recommendations, related-artists, and
+all BATCH reads (/artists?ids=, /tracks?ids=) are unavailable (403 or null) to
+new apps. Nothing here depends on them. "Mood" is derived deterministically from
+how the user listens — affinity tiers, recency, release era, duration, and
+(from the Extended Streaming History export) time-of-day and completion
+behavior. See moods.py for the full taxonomy.
 """
 
 __version__ = "0.1.0"
