@@ -85,18 +85,23 @@ async def sync_listening_history(saved_cap: int = 2000, auto_import_history: boo
     """Fetch and analyze the user's listening history from all available Spotify
     sources (top tracks across short/medium/long term, recently played, and the
     saved library), capture era/explicit/duration, dedupe, and cache it locally.
-    If an Extended Streaming History export has been dropped into the
-    `extended_history/` folder, it is auto-merged (unless auto_import_history is
-    false), unlocking the lifetime moods. `saved_cap` bounds saved-track pulls."""
+    Lifetime behavior from a previously imported Extended Streaming History
+    export is PRESERVED across re-syncs. If an export has been dropped into the
+    drop folder, it is auto-merged (unless auto_import_history is false),
+    unlocking the lifetime moods. `saved_cap` bounds saved-track pulls."""
     try:
         async with _client() as (settings, client):
+            previous = load_library(settings.library_path)
             library = await history_mod.build_library(client, saved_cap=saved_cap)
+            preserved = history_mod.carry_over_lifetime(previous, library)
             result = {
                 "tracks_analyzed": len(library.tracks),
                 "sources": dict(library.sources_summary),
                 "with_release_year": sum(1 for t in library.tracks if t.release_year),
                 "cached_at": settings.library_path.as_posix(),
             }
+            if preserved:
+                result["lifetime_tracks_preserved_from_cache"] = preserved
             if auto_import_history and settings.has_dropped_history():
                 library, report = await history_mod.merge_extended_history(
                     client, library, settings.history_dir
@@ -104,13 +109,15 @@ async def sync_listening_history(saved_cap: int = 2000, auto_import_history: boo
                 result["extended_history_auto_imported"] = report
                 result["lifetime_moods_unlocked"] = True
             else:
-                result["lifetime_moods_unlocked"] = any(t.has_lifetime for t in library.tracks)
-                result["drop_folder"] = settings.history_dir.as_posix()
-                result["hint"] = (
-                    "Drop your Extended Streaming History JSON files into the folder "
-                    "above (then re-run sync) to unlock lifetime moods like morning, "
-                    "on_repeat, comfort."
-                )
+                unlocked = any(t.has_lifetime for t in library.tracks)
+                result["lifetime_moods_unlocked"] = unlocked
+                if not unlocked:
+                    result["drop_folder"] = settings.history_dir.as_posix()
+                    result["hint"] = (
+                        "Drop your Extended Streaming History JSON files into the folder "
+                        "above (then re-run sync) to unlock lifetime moods like morning, "
+                        "on_repeat, comfort."
+                    )
             save_library(settings.library_path, library)
             return result
     except Exception as e:
@@ -216,14 +223,17 @@ def library_stats() -> dict:
 
 # --- moods / generation -----------------------------------------------------
 @mcp.tool()
-def list_moods() -> list[dict]:
+def list_moods() -> list[dict] | dict:
     """List the available behavioral moods. Each is marked whether it works now
     (instant, from API affinity) or needs the Extended Streaming History export
     (lifetime moods like morning/on_repeat/comfort)."""
-    settings = _settings()
-    lib = load_library(settings.library_path)
-    has_lifetime = bool(lib and any(t.has_lifetime for t in lib.tracks))
-    return moods_mod.list_moods(has_lifetime=has_lifetime)
+    try:
+        settings = _settings()
+        lib = load_library(settings.library_path)
+        has_lifetime = bool(lib and any(t.has_lifetime for t in lib.tracks))
+        return moods_mod.list_moods(has_lifetime=has_lifetime)
+    except Exception as e:
+        return _err(e)
 
 
 def _build_filters(

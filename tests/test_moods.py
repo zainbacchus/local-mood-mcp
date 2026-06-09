@@ -187,6 +187,12 @@ def test_validate_rejects_garbage():
         validate_track_ids(["not-a-valid-id"])
 
 
+def test_nonpositive_count_returns_empty():
+    lib = _instant_library()
+    assert select_for_mood(lib, "all_time_favorites", count=-3) == []
+    assert select_for_mood(lib, "all_time_favorites", count=0) == []
+
+
 def test_build_context_honors_pinned_now():
     lib = _instant_library()
     pinned = 1_700_000_000_000  # fixed instant -> reproducible recency/era

@@ -43,6 +43,14 @@ async def _resolve_device(client: SpotifyClient, device_id: str | None) -> str |
     return (active or devices[0]).get("id")
 
 
+def _friendly_rejection(e: SpotifyAPIError) -> PlaybackError:
+    return PlaybackError(
+        "Playback was rejected. This usually means the account is not "
+        "Premium, or the chosen device is unavailable. "
+        f"(Spotify said: {e})"
+    )
+
+
 async def play(
     client: SpotifyClient,
     *,
@@ -50,6 +58,11 @@ async def play(
     context_uri: str | None = None,
     device_id: str | None = None,
 ) -> dict:
+    if track_ids and context_uri:
+        raise PlaybackError(
+            "Pass either track_ids or playlist_id, not both — Spotify accepts "
+            "exactly one playback source per request."
+        )
     target = await _resolve_device(client, device_id)
     uris = None
     if track_ids:
@@ -59,24 +72,30 @@ async def play(
         await client.play(device_id=target, uris=uris, context_uri=context_uri)
     except SpotifyAPIError as e:
         if e.status in (403, 404):
-            raise PlaybackError(
-                "Playback was rejected. This usually means the account is not "
-                "Premium, or the chosen device is unavailable. "
-                f"(Spotify said: {e})"
-            ) from e
+            raise _friendly_rejection(e) from e
         raise
     return {"status": "playing", "device_id": target, "track_uris": uris, "context_uri": context_uri}
 
 
 async def pause(client: SpotifyClient, *, device_id: str | None = None) -> dict:
     target = await _resolve_device(client, device_id)
-    await client.pause(device_id=target)
+    try:
+        await client.pause(device_id=target)
+    except SpotifyAPIError as e:
+        if e.status in (403, 404):
+            raise _friendly_rejection(e) from e
+        raise
     return {"status": "paused", "device_id": target}
 
 
 async def skip_next(client: SpotifyClient, *, device_id: str | None = None) -> dict:
     target = await _resolve_device(client, device_id)
-    await client.next_track(device_id=target)
+    try:
+        await client.next_track(device_id=target)
+    except SpotifyAPIError as e:
+        if e.status in (403, 404):
+            raise _friendly_rejection(e) from e
+        raise
     return {"status": "skipped", "device_id": target}
 
 

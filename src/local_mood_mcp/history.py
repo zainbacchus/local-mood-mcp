@@ -135,9 +135,11 @@ def _iso_to_ms(ts: str | None) -> int | None:
 
 
 # --- Extended Streaming History --------------------------------------------
-def _iter_history_entries(path: Path):
+def _iter_history_entries(path: Path, skipped: list[str] | None = None):
     # Accept a single file, or a folder (recursively) — so dropping the whole
-    # unzipped "Spotify Extended Streaming History" folder just works.
+    # unzipped "Spotify Extended Streaming History" folder just works. Files
+    # that can't be parsed are recorded in `skipped` so dropped memory is
+    # visible to the caller rather than silently lost.
     if path.is_dir():
         files = sorted(path.rglob("*.json"))
     else:
@@ -146,19 +148,26 @@ def _iter_history_entries(path: Path):
         try:
             data = json.loads(fp.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
+            if skipped is not None:
+                skipped.append(fp.name)
             continue
         if isinstance(data, list):
             yield from data
+        elif skipped is not None:
+            skipped.append(fp.name)
 
 
-def parse_extended_history(path: Path) -> dict[str, Track]:
+def parse_extended_history(path: Path) -> tuple[dict[str, Track], list[str]]:
     """Aggregate the export into per-track behavioral Tracks.
 
     Timestamps are converted to the machine's LOCAL timezone so part-of-day and
     weekend splits reflect the listener's clock.
+
+    Returns (tracks_by_id, skipped_file_names).
     """
+    skipped: list[str] = []
     out: dict[str, Track] = {}
-    for entry in _iter_history_entries(path):
+    for entry in _iter_history_entries(path, skipped):
         if not isinstance(entry, dict):
             continue
         uri = entry.get("spotify_track_uri")
@@ -203,7 +212,7 @@ def parse_extended_history(path: Path) -> dict[str, Track]:
                 t.first_play_ms = ms
             if (t.last_played_ms or 0) < ms:
                 t.last_played_ms = ms
-    return out
+    return out, skipped
 
 
 async def merge_extended_history(
@@ -213,7 +222,7 @@ async def merge_extended_history(
     full behavioral profile; the most-played UNKNOWN tracks are added (with era/
     explicit/duration fetched individually, since batch /tracks is 403 for new
     apps)."""
-    parsed = parse_extended_history(path)
+    parsed, files_skipped = parse_extended_history(path)
     by_id = library.by_id()
     matched = 0
 
@@ -225,10 +234,11 @@ async def merge_extended_history(
                 existing.sources.append("extended_history")
             matched += 1
 
-    unknown = sorted(
+    unknown_all = sorted(
         ((tid, beh) for tid, beh in parsed.items() if tid not in by_id),
         key=lambda kv: (-kv[1].lifetime_plays, kv[0]),
-    )[:top_n_unknown]
+    )
+    unknown = unknown_all[:top_n_unknown]
 
     added = 0
     if unknown:
@@ -249,8 +259,38 @@ async def merge_extended_history(
         "unique_tracks_in_export": len(parsed),
         "matched_existing": matched,
         "added_from_export": added,
+        "unknown_tracks_dropped": len(unknown_all) - added,
+        "files_skipped": files_skipped,
         "total_streams_parsed": sum(t.lifetime_plays for t in parsed.values()),
     }
+
+
+def carry_over_lifetime(previous: Library | None, fresh: Library) -> int:
+    """Preserve lifetime behavior across re-syncs.
+
+    build_library only sees the API window (~50 recent plays + top-track
+    summaries); without this, lifetime signals imported from an export would be
+    wiped every time the user re-syncs. Copies behavioral fields onto matching
+    fresh tracks and re-appends export-only tracks that the API window no
+    longer surfaces. Returns the number of tracks whose lifetime data was
+    preserved.
+    """
+    if previous is None:
+        return 0
+    by_id = fresh.by_id()
+    preserved = 0
+    for old in previous.tracks:
+        if not old.has_lifetime:
+            continue
+        current = by_id.get(old.id)
+        if current is not None:
+            _copy_behavior(old, current)
+            if "extended_history" not in current.sources:
+                current.sources.append("extended_history")
+        else:
+            fresh.tracks.append(old)
+        preserved += 1
+    return preserved
 
 
 def _copy_behavior(src: Track, dst: Track) -> None:

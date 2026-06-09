@@ -94,7 +94,7 @@ def select_for_mood(
             s.track.id,
         )
     )
-    return scored[:count]
+    return scored[: max(0, count)]
 
 
 def selection_to_preview(selections: list[Selection]) -> list[dict]:
