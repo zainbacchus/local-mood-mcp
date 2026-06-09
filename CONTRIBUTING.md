@@ -12,7 +12,7 @@ Python ≥ 3.11.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest -q          # 16 tests, no network, no Spotify account required
+pytest -q          # synthetic data, no network, no Spotify account required
 ```
 
 The test suite runs entirely on synthetic data — no auth, no API calls — so you
