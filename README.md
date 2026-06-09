@@ -6,7 +6,7 @@
 
 > Spotify's API will tell a new app the last **~50 songs** you played.
 > Your Spotify export remembers **every song you've ever played**.
-> This project exists to measure what that difference is worth.
+> This project exists to show what that difference is worth.
 
 **local-mood-mcp** is an [MCP](https://modelcontextprotocol.io) server that
 builds deterministic, behavior-based Spotify playlists — and controls playback —
@@ -16,6 +16,14 @@ changes; the only variable is how much of your listening history it can see.
 Given identical developer constraints, adding memory turns a 50-play window
 into years of behavioral signal — unlocking playlist types and explanations
 that are impossible without it.
+
+## Why I built this
+
+I wanted my team to feel, not just hear, why memory matters in our AI
+workflows. Every signal here has an analogue in the systems we build: the
+API's 50-play window is a context window; the export is long-term memory; the
+lifetime moods are the capabilities that only exist once a system can
+remember. Better context leads to better outcomes.
 
 ## The experiment
 
