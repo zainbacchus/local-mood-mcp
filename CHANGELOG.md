@@ -25,6 +25,11 @@ All notable changes to this project are documented here. The format follows
   double-counts when an export lands.
 
 ### Fixed
+- Playlist writes migrated to the post-2026-02-11 routes (`POST /me/playlists`,
+  `POST /playlists/{id}/items`). The legacy `/users/{id}/playlists` and
+  `/playlists/{id}/tracks` return a generic 403 for apps created after the
+  migration (verified live); only grandfathered apps keep them. Also saves an
+  API round-trip (`/me` is no longer needed for creation).
 - Lifetime behavior from an imported Extended Streaming History export is now
   **preserved across `sync_listening_history` runs**. Previously a re-sync
   rebuilt the library from the API window and silently wiped lifetime data

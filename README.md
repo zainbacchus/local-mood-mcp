@@ -238,6 +238,7 @@ We confirmed the following **against a live new app**, not just the docs:
 | Release **era**, **explicit**, **duration**, IDs/names/URIs | OK |
 | Your **top tracks** (3 ranges), **recently-played**, **saved library** | OK |
 | Raw play history | **capped at the last ~50 plays** — no paging further back |
+| Legacy playlist writes (`POST /users/{id}/playlists`, `/playlists/{id}/tracks`) | `403` — replaced 2026-02-11 by `POST /me/playlists` and `/playlists/{id}/items` (this client uses the new routes) |
 
 The upshot: **there is no genre or audio signal available to a new app**, so the
 usual "mood = valence/energy/genre" approach is impossible. Instead, mood is

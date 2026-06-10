@@ -261,10 +261,7 @@ async def create_playlist_from_ids(
     ids = validate_track_ids(track_ids)
     if not ids:
         raise ValueError("No valid track IDs provided.")
-    me = await client.me()
-    playlist = await client.create_playlist(
-        me["id"], name, public=public, description=description
-    )
+    playlist = await client.create_playlist(name, public=public, description=description)
     uris = [f"spotify:track:{tid}" for tid in ids]
     await client.add_tracks(playlist["id"], uris)
     return {

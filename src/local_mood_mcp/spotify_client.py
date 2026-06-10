@@ -6,7 +6,7 @@ Scope of endpoints (all confirmed available to new apps as of 2026):
   GET  /me/player/recently-played
   GET  /me/tracks                   (saved library)
   GET  /tracks/{id}                 (single-track era/explicit/duration)
-  POST /users/{id}/playlists        POST /playlists/{id}/tracks
+  POST /me/playlists                POST /playlists/{id}/items
   GET  /me/player/devices
   GET  /me/player                   PUT /me/player/play  PUT /me/player/pause
   POST /me/player/next
@@ -15,6 +15,9 @@ VERIFIED 403 FOR NEW APPS (do not use):
   /audio-features  /audio-analysis  /recommendations  /artists/{id}/related-artists
   /browse/featured-playlists  /browse/categories/*/playlists
   /artists?ids=...  /tracks?ids=...   (BATCH gets are 403; single gets work)
+  POST /users/{id}/playlists  POST /playlists/{id}/tracks  (legacy write routes,
+  replaced 2026-02-11 by /me/playlists and /playlists/{id}/items; only apps
+  with pre-existing extended access keep the old paths — verified live)
   Also: artist objects return null genres/popularity; track objects omit
   popularity. So genre/popularity-based logic is impossible — we use behavior.
 
@@ -146,20 +149,21 @@ class SpotifyClient:
     async def saved_tracks(self, cap: int = 2000) -> list[dict]:
         return await self.get_all("/me/tracks", cap=cap)
 
-    async def create_playlist(
-        self, user_id: str, name: str, *, public: bool, description: str
-    ) -> dict:
+    async def create_playlist(self, name: str, *, public: bool, description: str) -> dict:
+        # /me/playlists is the post-2026-02-11 creation route; the legacy
+        # /users/{id}/playlists is 403 for apps without grandfathered access.
         return await self.request(
             "POST",
-            f"/users/{user_id}/playlists",
+            "/me/playlists",
             json={"name": name, "public": public, "description": description},
         )
 
     async def add_tracks(self, playlist_id: str, uris: list[str]) -> None:
-        # Spotify caps add-items at 100 per request.
+        # Spotify caps add-items at 100 per request. /items replaced the legacy
+        # /tracks route 2026-02-11.
         for i in range(0, len(uris), 100):
             await self.request(
-                "POST", f"/playlists/{playlist_id}/tracks", json={"uris": uris[i : i + 100]}
+                "POST", f"/playlists/{playlist_id}/items", json={"uris": uris[i : i + 100]}
             )
 
     # -- playback -----------------------------------------------------------
