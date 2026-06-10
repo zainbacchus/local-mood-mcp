@@ -1,7 +1,7 @@
 [project]
 name = "local-mood-mcp"
 version = "0.1.0"
-description = "Deterministic, behavior-based Spotify playlist generator and playback controller exposed as an MCP server. Built for the 2026 Spotify Web API (no genres / popularity / audio-features)."
+description = "Deterministic, memory-based Spotify playlist generator and playback controller exposed as an MCP server. Three tiers of memory (API window, lifetime history, semantic labels); built for the 2026 Spotify Web API (no genres / popularity / audio-features)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

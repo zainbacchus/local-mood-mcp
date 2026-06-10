@@ -260,6 +260,7 @@ def list_library_tracks(limit: int = 200, offset: int = 0) -> dict:
         settings = _settings()
         library = _require_library(settings)
         ordered = sorted(library.tracks, key=lambda t: (-t.affinity_plays, t.id))
+        offset = max(0, offset)
         page = ordered[offset : offset + max(0, limit)]
         return {
             "total_tracks": len(ordered),

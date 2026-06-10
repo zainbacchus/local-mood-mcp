@@ -33,7 +33,7 @@ to better outcomes.
 |---|---|---|
 | History depth | Last ~50 plays + 3×50 "top tracks" summaries | Every stream since your account was created |
 | Signals | "You played this recently", coarse affinity | Play counts, completions, skips, deliberate starts, hour-of-day, weekday/weekend, first/last play |
-| Moods available | 9 instant moods | + 7 lifetime moods |
+| Moods available | 9 instant moods | + 7 lifetime moods (+ 6 emotional, once semantic labels are stored — see below) |
 | Best possible "why" | "It's in your top tracks" | "Completed 96% of 412 plays, deliberately started, mostly 6–9 am, loyal since 2019" |
 
 Both tiers run the exact same selection algorithm
@@ -242,7 +242,9 @@ We confirmed the following **against a live new app**, not just the docs:
 The upshot: **there is no genre or audio signal available to a new app**, so the
 usual "mood = valence/energy/genre" approach is impossible. Instead, mood is
 defined by **how you actually listen** — affinity, recency, era, length, and
-(with the export) time-of-day and completion behavior.
+(with the export) time-of-day and completion behavior — plus, for the emotional
+moods, **labels the model writes once** via `annotate_tracks`, since Spotify
+provides no emotional signal to measure.
 
 </details>
 
