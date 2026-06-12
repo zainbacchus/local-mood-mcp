@@ -1,0 +1,25 @@
+# Secrets & local state — never commit
+.env
+*.enc
+fkey
+library.json
+tokens.enc
+play_journal.jsonl
+
+# Extended Streaming History export — PERSONAL DATA (IPs, timestamps). Never commit.
+# Everything in the drop folder is ignored except the README and .gitkeep.
+extended_history/*
+!extended_history/.gitkeep
+!extended_history/README.md
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# OS
+.DS_Store
