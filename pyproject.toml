@@ -1,0 +1,49 @@
+[project]
+name = "local-mood-mcp"
+version = "0.1.0"
+description = "Deterministic, memory-based Spotify playlist generator and playback controller exposed as an MCP server. Three tiers of memory (API window, lifetime history, semantic labels); built for the 2026 Spotify Web API (no genres / popularity / audio-features)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Zain Bacchus" }]
+keywords = ["spotify", "mcp", "model-context-protocol", "playlist", "claude", "music"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "httpx>=0.27",
+    "keyring>=25",
+    "cryptography>=42",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/zainbacchus/local-mood-mcp"
+Repository = "https://github.com/zainbacchus/local-mood-mcp"
+Issues = "https://github.com/zainbacchus/local-mood-mcp/issues"
+
+[project.scripts]
+local-mood-mcp = "local_mood_mcp.server:main"
+local-mood-auth = "local_mood_mcp.auth:cli_main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/local_mood_mcp"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
