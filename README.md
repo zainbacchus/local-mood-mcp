@@ -27,6 +27,10 @@ once instead of guessed at every time; the lifetime moods are the
 capabilities that only exist once a system can remember. Better context leads
 to better outcomes.
 
+Memory even draws its own boundary: it decides not just what to resurface but
+what counts as *new* — so discovery here (`discover`) is simply the whole
+catalog minus everything your memory already holds.
+
 ## The experiment
 
 | | Working memory (API only) | Long-term memory (your export) |
@@ -68,8 +72,11 @@ the export loaded):
 
 **What this does *not* claim:** Spotify's own features (Daylist, Discover
 Weekly) use your full history internally, plus collaborative data from hundreds
-of millions of users — and this tool can't recommend music you've never played
-(the recommendations endpoint is gone for new apps). What it demonstrates is
+of millions of users — this tool has none of that, and no *algorithmic*
+recommendation: "tracks similar to X" is impossible since the recommendations
+and related-artists endpoints are gone for new apps. It *can* surface music
+you've never played (`discover`), but only as plain catalog search minus your
+own history — keyword discovery, not personalization. What it demonstrates is
 what *you* can build when given the same memory Spotify keeps for itself: full
 control over the slice ("morning songs, nothing explicit, pre-2010"), a
 transparent per-component `why` for every pick, and reproducible results
@@ -195,6 +202,9 @@ committed. Until the export arrives, instant moods work fully.
 | `explain_track` | Why a track scores as it does for a mood |
 | `create_playlist` | Create a playlist from **exact** track IDs |
 | `create_mood_playlist` | Select for a mood and create, in one step (still ID-based) |
+| `search_catalog` | Raw catalog search → exact IDs (whole catalog, no library filtering) |
+| `discover` | **New to you**: catalog search by genre/year/text, minus everything in your library + journal → preview IDs |
+| `create_discovery_playlist` | Discover and create in one step; can `weave` familiar `seed_track_ids` through the new finds |
 | `list_devices` | Your Spotify Connect devices |
 | `play` / `pause` / `skip_next` / `now_playing` | Playback control (Premium) |
 
@@ -205,6 +215,13 @@ committed. Until the export arrives, instant moods work fully.
 `require_affinity`, and `familiarity_weight` (0 = pure mood fit, 1 = pure
 listen-frequency). Ordering is fully specified: final score, then affinity
 plays, lifetime plays, and finally track id as a stable tiebreak.
+
+`discover` / `create_discovery_playlist` instead take `genres`, `query`,
+`min_year`/`max_year`, `exclude_known`, `exclude_known_artists`,
+`exclude_explicit`, `per_query`, and (for create) `seed_track_ids` + `weave`.
+Unlike the moods, discovery is **non-deterministic** — it reaches the live
+catalog, which changes — and is query-driven, since Spotify gives new apps no
+recommendations endpoint or genre/popularity metadata.
 
 ## Security posture
 
@@ -251,8 +268,12 @@ provides no emotional signal to measure.
 
 ## Limitations (stated honestly)
 
-- **No discovery** — this re-curates what you've already played; it cannot
-  suggest unheard music (the recommendations endpoint is dead for new apps).
+- **Discovery is search-based, not recommendations** — `discover` finds unheard
+  music by querying the catalog (genre / year / text) and subtracting what
+  you've already played, but it cannot do "tracks similar to X": the
+  recommendations and related-artists endpoints are dead for new apps. Results
+  are only as good as the search query — there's no acoustic similarity behind
+  them. The mood tools remain pure re-curation of your own history.
 - **No genre or acoustic mood from Spotify** — the API exposes neither to new
   apps. Behavioral moods are temporal/era-based and deliberately transparent;
   emotional moods come from **model-written labels**, which are subjective

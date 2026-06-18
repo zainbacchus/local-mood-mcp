@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Catalog discovery — the first tools that reach beyond your own history:
+  `discover` searches Spotify's catalog by genre / year / free text and
+  subtracts everything already in your cached library + play journal (and,
+  optionally, anything by an artist you already know), returning only tracks you
+  have not heard. `search_catalog` is the raw passthrough; `create_discovery_playlist`
+  does discover-then-create in one step and can `weave` familiar `seed_track_ids`
+  (e.g. saved Larry June / Mac Miller) through the new finds. Non-deterministic
+  by design — it hits the live catalog, the inverse of the behavioral moods.
+  Verified live for this app: `/search` works but caps `limit` at 10 (we page in
+  10s) and 403s on `market=from_token`; both quirks are documented in the client.
 - Semantic memory tier: `annotate_tracks` persists emotional labels written
   by the MCP client (`happy`, `energetic`, `motivated`, `sad`, `melancholy`,
   `calm`), `list_library_tracks` pages the library for labeling, and six

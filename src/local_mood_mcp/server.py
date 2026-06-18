@@ -17,6 +17,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from . import discover as discover_mod
 from . import history as history_mod
 from . import moods as moods_mod
 from . import playback as playback_mod
@@ -56,6 +57,27 @@ def _require_library(settings: Settings) -> Library:
             "No analyzed library yet. Run the `sync_listening_history` tool first."
         )
     return lib
+
+
+def _known_from_library(settings: Settings) -> tuple[set[str], set[str]]:
+    """The user's 'already heard' universe, for discovery exclusion: every track
+    id and artist name in the cached library plus the append-only play journal.
+    Missing library/journal just yields empty sets (discovery still works)."""
+    ids: set[str] = set()
+    artists: set[str] = set()
+    lib = load_library(settings.library_path)
+    if lib:
+        for t in lib.tracks:
+            ids.add(t.id)
+            artists.update(a.strip().lower() for a in t.artist_names if a)
+    for entry in read_play_journal(settings.journal_path):
+        tid = entry.get("track_id")
+        if tid:
+            ids.add(tid)
+        for a in entry.get("artists") or []:
+            if a:
+                artists.add(str(a).strip().lower())
+    return ids, artists
 
 
 def _err(e: Exception) -> dict:
@@ -502,6 +524,158 @@ async def create_mood_playlist(
             )
         result["mood"] = mood
         result["selected_tracks"] = playlists_mod.selection_to_preview(sels)
+        return result
+    except Exception as e:
+        return _err(e)
+
+
+# --- discovery (reaches BEYOND the cached library) --------------------------
+@mcp.tool()
+async def search_catalog(query: str, limit: int = 20, exclude_explicit: bool = False) -> dict:
+    """Search Spotify's whole catalog (NOT just your library) for tracks and
+    return them as exact IDs. Raw passthrough: it does NOT filter out what you've
+    already heard (use `discover` for that) and creates nothing. `query` accepts
+    Spotify field filters, e.g. `genre:"deep house" year:2023-2026` or
+    `artist:"Lane 8"`. Non-deterministic — results track the live catalog."""
+    try:
+        async with _client() as (_s, client):
+            cands = await discover_mod.search(
+                client, query, limit=limit, exclude_explicit=exclude_explicit
+            )
+        return {
+            "query": query,
+            "count": len(cands),
+            "track_ids": [c.id for c in cands],
+            "tracks": [c.to_preview() for c in cands],
+            "deterministic": False,
+        }
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+async def discover(
+    genres: list[str] | None = None,
+    query: str | None = None,
+    count: int = 25,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    exclude_known: bool = True,
+    exclude_known_artists: bool = False,
+    exclude_explicit: bool = False,
+    per_query: int = 100,
+) -> dict:
+    """Find tracks you have NOT heard before — the one tool that reaches beyond
+    your listening history into Spotify's catalog. Give it `genres` (e.g.
+    ["deep house", "melodic house"]) and/or a free-text `query`, optionally a
+    year range, and it searches the catalog and removes everything already in
+    your cached library + play journal, returning a PREVIEW of new track IDs
+    (pass them to create_playlist, or use create_discovery_playlist to do both).
+    Set exclude_known_artists=True to surface genuinely new artists only.
+    Discovery is NOT deterministic (it hits the live catalog) and needs no
+    Extended History — it's the inverse of the behavioral moods. Spotify gives
+    new apps no genre/popularity on objects and no recommendations endpoint, so
+    discovery is query-driven, not 'similar to artist X'."""
+    try:
+        settings = _settings()
+        if exclude_known or exclude_known_artists:
+            known_ids, known_artists = _known_from_library(settings)
+        else:
+            known_ids, known_artists = set(), set()
+        async with _client() as (_s, client):
+            cands = await discover_mod.discover(
+                client,
+                genres=genres,
+                query=query,
+                count=count,
+                min_year=min_year,
+                max_year=max_year,
+                known_ids=known_ids,
+                known_artists=known_artists,
+                exclude_known=exclude_known,
+                exclude_known_artists=exclude_known_artists,
+                exclude_explicit=exclude_explicit,
+                per_query=per_query,
+            )
+        return {
+            "count": len(cands),
+            "track_ids": [c.id for c in cands],
+            "tracks": [c.to_preview() for c in cands],
+            "filtered_against": {
+                "known_track_ids": len(known_ids),
+                "known_artists": len(known_artists),
+                "exclude_known": exclude_known,
+                "exclude_known_artists": exclude_known_artists,
+            },
+            "deterministic": False,
+        }
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+async def create_discovery_playlist(
+    name: str,
+    genres: list[str] | None = None,
+    query: str | None = None,
+    count: int = 25,
+    public: bool = False,
+    description: str = "",
+    min_year: int | None = None,
+    max_year: int | None = None,
+    exclude_known: bool = True,
+    exclude_known_artists: bool = False,
+    exclude_explicit: bool = False,
+    per_query: int = 100,
+    seed_track_ids: list[str] | None = None,
+    weave: bool = True,
+) -> dict:
+    """Discover new tracks and create the playlist in one step — the discovery
+    analog of create_mood_playlist, and the 'make me a deep-house mix of stuff I
+    haven't heard' path. Optionally pass `seed_track_ids` (exact IDs/URIs/URLs of
+    familiar anchors, e.g. saved Larry June / Mac Miller tracks) to blend the
+    familiar with the new: weave=True spreads the seeds through the discoveries,
+    weave=False puts them first. Private by default. Non-deterministic."""
+    try:
+        settings = _settings()
+        if exclude_known or exclude_known_artists:
+            known_ids, known_artists = _known_from_library(settings)
+        else:
+            known_ids, known_artists = set(), set()
+        async with _client() as (_s, client):
+            cands = await discover_mod.discover(
+                client,
+                genres=genres,
+                query=query,
+                count=count,
+                min_year=min_year,
+                max_year=max_year,
+                known_ids=known_ids,
+                known_artists=known_artists,
+                exclude_known=exclude_known,
+                exclude_known_artists=exclude_known_artists,
+                exclude_explicit=exclude_explicit,
+                per_query=per_query,
+            )
+            discovered_ids = [c.id for c in cands]
+            seeds = (
+                playlists_mod.validate_track_ids(seed_track_ids) if seed_track_ids else []
+            )
+            final_ids = discover_mod.blend_ids(seeds, discovered_ids, weave=weave)
+            if not final_ids:
+                return {
+                    "error": "NoMatches",
+                    "message": "Discovery returned no new tracks for those genres/filters.",
+                }
+            label = ", ".join(genres or ([query] if query else ["catalog"]))
+            desc = description or f"New-music discovery mix (local-mood-mcp): {label}."
+            result = await playlists_mod.create_playlist_from_ids(
+                client, name=name, track_ids=final_ids, public=public, description=desc
+            )
+        result["discovered_count"] = len(discovered_ids)
+        result["seed_track_ids"] = seeds
+        result["discovered_tracks"] = [c.to_preview() for c in cands]
+        result["deterministic"] = False
         return result
     except Exception as e:
         return _err(e)

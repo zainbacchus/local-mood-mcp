@@ -10,6 +10,7 @@ Scope of endpoints (all confirmed available to new apps as of 2026):
   GET  /me/player/devices
   GET  /me/player                   PUT /me/player/play  PUT /me/player/pause
   POST /me/player/next
+  GET  /search                      (type=track; verified live for this app)
 
 VERIFIED 403 FOR NEW APPS (do not use):
   /audio-features  /audio-analysis  /recommendations  /artists/{id}/related-artists
@@ -148,6 +149,18 @@ class SpotifyClient:
 
     async def saved_tracks(self, cap: int = 2000) -> list[dict]:
         return await self.get_all("/me/tracks", cap=cap)
+
+    async def search_tracks(self, q: str, *, limit: int = 10, offset: int = 0) -> list[dict]:
+        """Search the public catalog for tracks (the only endpoint that reaches
+        beyond the user's own data). `q` may carry Spotify field filters, e.g.
+        `genre:"deep house" year:2023-2026`. Two live-verified quirks for this
+        app: `limit` is capped at 10 (11+ -> 400 "Invalid limit"), so callers
+        page via `offset` for more; and `market=from_token` 403s (it needs
+        `user-read-private`, which this app does not request), so we never send
+        it. Returns raw track objects (popularity is omitted for new apps)."""
+        limit = max(1, min(int(limit), 10))
+        data = await self.get("/search", q=q, type="track", limit=limit, offset=max(0, int(offset)))
+        return ((data or {}).get("tracks") or {}).get("items") or []
 
     async def create_playlist(self, name: str, *, public: bool, description: str) -> dict:
         # /me/playlists is the post-2026-02-11 creation route; the legacy
