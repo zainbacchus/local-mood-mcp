@@ -5,9 +5,9 @@ your full listening history (which contains IP addresses and timestamps).
 
 ## Reporting a vulnerability
 
-If you find a vulnerability — token leakage, a way to bypass the keyring or
+If you find a vulnerability (token leakage, a way to bypass the keyring or
 encrypted-file storage, redirect/CSRF weaknesses in the PKCE flow, or personal
-data escaping the git-ignored drop folder — please report it **privately**
+data escaping the git-ignored drop folder), please report it **privately**
 rather than opening a public issue. Use GitHub's private vulnerability
 reporting ("Report a vulnerability" under the repository's Security tab).
 

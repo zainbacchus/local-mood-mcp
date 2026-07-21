@@ -15,17 +15,17 @@ pip install -e ".[dev]"
 pytest -q          # synthetic data, no network, no Spotify account required
 ```
 
-The test suite runs entirely on synthetic data — no auth, no API calls — so you
+The test suite runs entirely on synthetic data (no auth, no API calls), so you
 can iterate on the scoring/selection logic without a Spotify app.
 
 ## Project layout
 
 | Path | Role |
 |------|------|
-| `src/local_mood_mcp/moods.py` | Mood taxonomy — each mood is a pure `(Track, Context) -> (score, components)` |
+| `src/local_mood_mcp/moods.py` | Mood taxonomy: each mood is a pure `(Track, Context) -> (score, components)` |
 | `src/local_mood_mcp/playlists.py` | Deterministic selection + ID-only playlist creation |
 | `src/local_mood_mcp/history.py` | Library building (API affinity + Extended Streaming History) |
-| `src/local_mood_mcp/spotify_client.py` | Async client — only non-deprecated endpoints |
+| `src/local_mood_mcp/spotify_client.py` | Async client (only non-deprecated endpoints) |
 | `src/local_mood_mcp/auth.py` | OAuth (PKCE) + token refresh + login CLI |
 | `src/local_mood_mcp/tokenstore.py` | Keyring / encrypted-file token storage |
 | `src/local_mood_mcp/server.py` | MCP tool surface |
@@ -39,11 +39,11 @@ can iterate on the scoring/selection logic without a Spotify app.
   synthetic-library style in `tests/test_moods.py`.
 - **Don't call deprecated endpoints.** Genres, popularity, audio-features,
   recommendations, related-artists, and batch reads are all `403`/`null` for new
-  apps — see the inventory at the top of `spotify_client.py`.
+  apps; see the inventory at the top of `spotify_client.py`.
 - **Request only scopes you use.** Every scope in `config.py` must map to an
   endpoint the server actually calls.
 - **Never log tokens or commit personal data.** The Extended Streaming History
-  export contains IPs and timestamps; the drop folders are git-ignored — keep it
+  export contains IPs and timestamps; the drop folders are git-ignored. Keep it
   that way.
 
 ## Pull requests

@@ -261,7 +261,13 @@ def cli_main(argv: list[str] | None = None) -> int:
             print("Not authenticated.")
             return 1
         remaining = int(bundle.expires_at - time.time())
-        print(f"Authenticated. Access token expires in ~{max(remaining,0)}s.")
+        if remaining > 0:
+            print(f"Authenticated. Access token expires in ~{remaining}s.")
+        else:
+            print(
+                "Authenticated. Access token is expired; it refreshes "
+                "automatically on the next call."
+            )
         print(f"Scopes: {bundle.scope}")
         return 0
     print(f"Unknown command: {cmd!r}. Use one of: login, logout, status.")
